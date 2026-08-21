@@ -469,6 +469,418 @@ class RuleTests(unittest.TestCase):
         self.assertNotIn("SLP014", [finding.code for finding in production])
         self.assert_codes(stub, ["SLP001"])
 
+    def test_overridable_init_call_reports_same_class_dispatch(self) -> None:
+        findings = self.lint("""
+            class Loader:
+                def __init__(instance):
+                    instance.configure()
+
+                def configure(instance):
+                    instance.ready = True
+
+            class InheritedHook:
+                def __init__(self):
+                    self.configure()
+            """)
+
+        dispatch = [finding for finding in findings if finding.code == "SLP015"]
+        self.assertEqual(len(dispatch), 1)
+        self.assertIn("Loader.__init__", dispatch[0].message)
+        self.assertIn("configure", dispatch[0].message)
+
+    def test_overridable_init_call_accepts_non_overridable_and_deferred_calls(
+        self,
+    ) -> None:
+        findings = self.lint("""
+            from typing import final as sealed
+
+            def replacement(instance):
+                instance.ready = True
+
+            @sealed
+            class Closed:
+                def __init__(self):
+                    self.prepare()
+
+                def prepare(self):
+                    self.ready = True
+
+            class FixedHook:
+                def __init__(self):
+                    self.prepare()
+
+                @sealed
+                def prepare(self):
+                    self.ready = True
+
+            class PrivateHook:
+                def __init__(owner):
+                    owner.__prepare()
+                    owner.__repr__()
+
+                def __prepare(owner):
+                    owner.ready = True
+
+                def __repr__(owner):
+                    return "PrivateHook"
+
+            class DeferredHook:
+                def __init__(self):
+                    def later():
+                        self.prepare()
+
+                    self.later = later
+
+                def prepare(self):
+                    self.ready = True
+
+            class ReboundHook:
+                def __init__(self):
+                    self.prepare()
+
+                def prepare(self):
+                    self.ready = True
+
+                prepare = replacement
+            """)
+
+        self.assertNotIn("SLP015", [finding.code for finding in findings])
+
+    def test_overridable_init_call_supports_inline_suppression(self) -> None:
+        findings = self.lint("""
+            class FrameworkBase:
+                def __init__(self):
+                    self.register()  # noqa: SLP015
+
+                def register(self):
+                    self.ready = True
+            """)
+
+        self.assertNotIn("SLP015", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_reports_readable_missing_state(self) -> None:
+        findings = self.lint("""
+            class Connection:
+                def __init__(owner, connected, skip):
+                    if skip:
+                        return
+                    if connected:
+                        owner.session = "ready"
+
+                def send(owner):
+                    return owner.session
+
+            class RequiredState:
+                def __init__(self, enabled):
+                    if not enabled:
+                        raise ValueError("disabled")
+                    self.value = 1
+
+                def read(self):
+                    return self.value
+            """)
+
+        state_findings = [finding for finding in findings if finding.code == "SLP016"]
+        self.assertEqual(len(state_findings), 1)
+        self.assertIn("Connection.session", state_findings[0].message)
+
+    def test_conditional_instance_state_accepts_safe_initialization_patterns(
+        self,
+    ) -> None:
+        findings = self.lint("""
+            class CompleteBranches:
+                def __init__(self, active):
+                    if active:
+                        self.state = "active"
+                    else:
+                        self.state = "idle"
+
+                def read(self):
+                    return self.state
+
+            class DefaultFirst:
+                def __init__(self, failed):
+                    self.error = None
+                    if failed:
+                        self.error = "failed"
+
+                def read(self):
+                    return self.error
+
+            class ClassFallback:
+                label = "unknown"
+
+                def __init__(self, label):
+                    if label:
+                        self.label = label
+
+                def read(self):
+                    return self.label
+
+            class LocalInitialization:
+                def __init__(self, seed):
+                    if seed:
+                        self.cache = {"seed": seed}
+
+                def rebuild(self):
+                    self.cache = {}
+                    return self.cache
+
+            class DefensiveLookup:
+                def __init__(self, supplied):
+                    if supplied:
+                        self.optional = supplied
+
+                def read(self):
+                    if hasattr(self, "optional"):
+                        return getattr(self, "optional")
+                    return None
+
+            class DynamicAttributes:
+                def __init__(self, supplied):
+                    if supplied:
+                        self.dynamic = supplied
+
+                def __getattr__(self, name):
+                    return None
+
+                def read(self):
+                    return self.dynamic
+
+            class ExhaustiveMatch:
+                def __init__(self, mode):
+                    match mode:
+                        case "fast":
+                            self.kind = "fast"
+                        case _:
+                            self.kind = "safe"
+
+                def read(self):
+                    return self.kind
+            """)
+
+        self.assertNotIn("SLP016", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_handles_returning_try(self) -> None:
+        findings = self.lint("""
+            class ReturningTry:
+                def __init__(self):
+                    try:
+                        self.value = 1
+                        return
+                    finally:
+                        audit()
+
+                def read(self):
+                    return self.value
+            """)
+
+        self.assertNotIn("SLP016", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_accepts_method_fallback(self) -> None:
+        findings = self.lint("""
+            class Handler:
+                def __init__(self, replacement):
+                    if replacement is not None:
+                        self.handle = replacement
+
+                def handle(self, value):
+                    return value
+
+                def run(self, value):
+                    return self.handle(value)
+            """)
+
+        self.assertNotIn("SLP016", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_supports_inline_suppression(self) -> None:
+        findings = self.lint("""
+            class ExternalHydration:
+                def __init__(self, hydrated):
+                    if hydrated:
+                        self.value = hydrated
+
+                def read(self):
+                    return self.value  # noqa: SLP016
+            """)
+
+        self.assertNotIn("SLP016", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_suppression_is_line_scoped(self) -> None:
+        findings = self.lint("""
+            class ExternalHydration:
+                def __init__(self, hydrated):
+                    if hydrated:
+                        self.value = hydrated
+
+                def optional_read(self):
+                    return self.value  # noqa: SLP016
+
+                def required_read(self):
+                    return self.value
+            """)
+
+        state_findings = [finding for finding in findings if finding.code == "SLP016"]
+        self.assertEqual(len(state_findings), 1)
+        self.assertEqual(state_findings[0].line, 11)
+
+    def test_shared_mutable_class_state_reports_instance_mutations(self) -> None:
+        findings = self.lint("""
+            class Registry:
+                entries = []
+                cache = {}
+                flags = set()
+
+                def add(owner, item):
+                    owner.entries.append(item)
+                    owner.cache[item] = True
+                    owner.flags |= {item}
+
+            class SometimesLocal:
+                values = []
+
+                def __init__(self, isolated):
+                    if isolated:
+                        self.values = []
+
+                def add(self, value):
+                    self.values.append(value)
+            """)
+
+        mutations = [finding for finding in findings if finding.code == "SLP017"]
+        self.assertEqual(len(mutations), 4)
+        self.assertTrue(
+            all("shared mutable class state" in item.message for item in mutations)
+        )
+
+    def test_shared_mutable_class_state_accepts_intentional_and_local_state(
+        self,
+    ) -> None:
+        findings = self.lint("""
+            from typing import ClassVar as Shared
+
+            class Registry:
+                global_entries: Shared[list[str]] = []
+                entries = []
+                cache = {}
+                flags = set()
+
+                def __init__(owner):
+                    owner.entries = []
+                    owner.cache = {}
+                    owner.flags = set()
+
+                def add(owner, item):
+                    owner.global_entries.append(item)
+                    owner.entries.append(item)
+                    owner.cache[item] = True
+                    owner.flags.add(item)
+
+            class ExplicitClassMutation:
+                entries = []
+
+                def add(self, item):
+                    ExplicitClassMutation.entries.append(item)
+
+            class LocalReset:
+                entries = []
+
+                def rebuild(self, item):
+                    self.entries = []
+                    self.entries.append(item)
+
+            class ReboundContainer:
+                entries = []
+                entries = Bucket()
+
+                def add(self, item):
+                    self.entries.append(item)
+
+            class ExternalBinding:
+                target.entries = []
+
+                def add(self, item):
+                    self.entries.append(item)
+            """)
+
+        self.assertNotIn("SLP017", [finding.code for finding in findings])
+
+    def test_shared_mutable_class_state_supports_inline_suppression(self) -> None:
+        findings = self.lint("""
+            class LegacyRegistry:
+                entries = []
+
+                def add(self, item):
+                    self.entries.append(item)  # noqa: SLP017
+            """)
+
+        self.assertNotIn("SLP017", [finding.code for finding in findings])
+
+    def test_shared_mutable_class_state_deduplicates_finally_paths(self) -> None:
+        findings = self.lint("""
+            class AuditLog:
+                entries = []
+
+                def record(self, item, early):
+                    try:
+                        if early:
+                            return
+                    finally:
+                        self.entries.append(item)
+            """)
+
+        mutations = [finding for finding in findings if finding.code == "SLP017"]
+        self.assertEqual(len(mutations), 1)
+
+    def test_shared_mutable_class_state_ignores_shadowed_constructors(self) -> None:
+        findings = self.lint("""
+            from custom_containers import list
+
+            class ImportedFactory:
+                entries = list()
+
+                def add(self, item):
+                    self.entries.append(item)
+
+            class LocalFactory:
+                def set():
+                    return Bucket()
+
+                entries = set()
+
+                def add(self, item):
+                    self.entries.add(item)
+            """)
+
+        self.assertNotIn("SLP017", [finding.code for finding in findings])
+
+    def test_class_rules_resolve_enclosing_function_aliases(self) -> None:
+        findings = self.lint("""
+            def build_types():
+                from typing import ClassVar as Shared
+                from typing import final as sealed
+
+                @sealed
+                class Closed:
+                    def __init__(self):
+                        self.prepare()
+
+                    def prepare(self):
+                        self.ready = True
+
+                class Registry:
+                    entries: Shared[list[str]] = []
+
+                    def add(self, item):
+                        self.entries.append(item)
+
+                return Closed, Registry
+            """)
+
+        codes = [finding.code for finding in findings]
+        self.assertNotIn("SLP015", codes)
+        self.assertNotIn("SLP017", codes)
+
     def test_narrating_comment_cluster_is_reported_once(self) -> None:
         findings = self.lint("""
             def normalize(items):

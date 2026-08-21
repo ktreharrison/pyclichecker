@@ -37,7 +37,7 @@ pyclichecker . --format github
 For a one-off run without installing the command:
 
 ```bash
-uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.3.0 \
+uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.4.0 \
   pyclichecker .
 ```
 
@@ -79,6 +79,9 @@ A practical review loop is:
 | `SLP012` | warning | Path tied to one user's home directory | Use `Path.home()`, a project-relative path, or configuration. |
 | `SLP013` | warning | Known blocking API called inside async code | Use an async API or move the blocking call to a worker thread. |
 | `SLP014` | warning | Test has no explicit result or failure oracle | Assert an observable result or declare the expected exception or failure. |
+| `SLP015` | warning | Overridable method called from `__init__` | Initialize state directly, or make the hook private or final. |
+| `SLP016` | warning | Instance state initialized on only some constructor paths | Initialize the attribute unconditionally before other methods can read it. |
+| `SLP017` | warning | Shared mutable class state changed through an instance | Initialize it per instance or mark intentional shared state as `ClassVar`. |
 
 Rule selection accepts exact codes or prefixes:
 
@@ -138,7 +141,7 @@ installing the package.
 Agents should use the pinned release and JSON output for stable results:
 
 ```bash
-uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.3.0 \
+uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.4.0 \
   pyclichecker changed_file.py --format json
 ```
 
@@ -163,7 +166,7 @@ project's `AGENTS.md`:
 After creating or changing Python code:
 
 1. Run pyclichecker on every changed Python file:
-   `uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.3.0 pyclichecker changed_file.py --format json`
+   `uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.4.0 pyclichecker changed_file.py --format json`
 2. Treat exit 1 as findings to fix and exit 2 as an incomplete scan.
 3. Fix findings and rerun relevant tests. Do not add broad suppressions.
 4. Run the final repository gate with the same command, replacing

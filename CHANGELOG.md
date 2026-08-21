@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.0 - 2026-08-21
+
+- Added `SLP015` for constructor calls that dispatch to overridable same-class
+  methods before initialization is complete.
+- Added `SLP016` for instance attributes that are initialized on only some
+  successful constructor paths and later read without a local assignment.
+- Added `SLP017` for instance methods that mutate mutable list, dictionary, or
+  set state inherited from the class.
+- Added conservative exemptions for final and private methods, class fallbacks,
+  dynamic attributes, `ClassVar`, per-instance initialization, explicit class
+  mutation, and nested scopes.
+- Added positive, corrected, false-positive, and inline-suppression coverage
+  for all three class-correctness rules.
+
 ## 2.3.0 - 2026-08-21
 
 - Added `SLP009` for unchecked `subprocess.run` outcomes.

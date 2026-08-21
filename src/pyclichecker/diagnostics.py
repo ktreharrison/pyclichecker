@@ -101,6 +101,24 @@ RULES = {
             "assertion-free-test",
             "Test function has no explicit result or expected-failure oracle.",
         ),
+        Rule(
+            "SLP015",
+            "warning",
+            "overridable-init-call",
+            "Constructor calls a same-class method that subclasses can override.",
+        ),
+        Rule(
+            "SLP016",
+            "warning",
+            "conditional-instance-state",
+            "Instance attribute is not initialized on every successful constructor path.",
+        ),
+        Rule(
+            "SLP017",
+            "warning",
+            "shared-mutable-class-state",
+            "Instance method mutates mutable state inherited from the class.",
+        ),
     )
 }
 

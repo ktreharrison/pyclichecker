@@ -65,6 +65,33 @@ REMOTE_URL_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 TEST_OUTCOME_DECORATORS = frozenset(
     {"expectedFailure", "skip", "skipIf", "skipUnless", "skipif", "xfail"}
 )
+MUTATING_CONTAINER_METHODS = frozenset(
+    {
+        "__delitem__",
+        "__iadd__",
+        "__imul__",
+        "__ior__",
+        "__isub__",
+        "__ixor__",
+        "__setitem__",
+        "add",
+        "append",
+        "clear",
+        "difference_update",
+        "discard",
+        "extend",
+        "insert",
+        "intersection_update",
+        "pop",
+        "popitem",
+        "remove",
+        "reverse",
+        "setdefault",
+        "sort",
+        "symmetric_difference_update",
+        "update",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +132,14 @@ class OperationalCall:
 
     node: ast.Call
     qualified_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class AttributeFlow:
+    """Definitely assigned attributes at fallthrough and successful returns."""
+
+    fallthrough: frozenset[str] | None
+    returns: frozenset[str] | None
 
 
 def _expression_name(node: ast.AST | None) -> str:
@@ -713,6 +748,638 @@ def _find_blocking_calls(
     return visitor.calls
 
 
+def _first_positional_parameter(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str | None:
+    positional = (*node.args.posonlyargs, *node.args.args)
+    return positional[0].arg if positional else None
+
+
+def _decorator_expression(node: ast.expr) -> ast.expr:
+    return node.func if isinstance(node, ast.Call) else node
+
+
+def _has_decorator(
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    aliases: dict[str, str],
+) -> bool:
+    for decorator in node.decorator_list:
+        raw_name = _expression_name(_decorator_expression(decorator))
+        qualified_name = _resolve_imported_name(raw_name, aliases)
+        if raw_name.split(".")[-1] == name or qualified_name == f"typing.{name}":
+            return True
+    return False
+
+
+def _is_instance_method(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    aliases: dict[str, str],
+) -> bool:
+    return bool(
+        _first_positional_parameter(node)
+        and not _has_decorator(node, "staticmethod", aliases)
+        and not _has_decorator(node, "classmethod", aliases)
+    )
+
+
+def _assigned_instance_attributes(target: ast.AST, instance: str) -> set[str]:
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == instance
+    ):
+        return {target.attr}
+    if isinstance(target, ast.Starred):
+        return _assigned_instance_attributes(target.value, instance)
+    if isinstance(target, (ast.List, ast.Tuple)):
+        assigned: set[str] = set()
+        for element in target.elts:
+            assigned.update(_assigned_instance_attributes(element, instance))
+        return assigned
+    return set()
+
+
+def _merge_attribute_states(
+    *states: frozenset[str] | None,
+) -> frozenset[str] | None:
+    reachable = [state for state in states if state is not None]
+    if not reachable:
+        return None
+    merged = set(reachable[0])
+    for state in reachable[1:]:
+        merged.intersection_update(state)
+    return frozenset(merged)
+
+
+def _root_instance_attribute(node: ast.AST, instance: str) -> str | None:
+    current = node
+    while isinstance(current, (ast.Attribute, ast.Subscript)):
+        if (
+            isinstance(current, ast.Attribute)
+            and isinstance(current.value, ast.Name)
+            and current.value.id == instance
+        ):
+            return current.attr
+        current = current.value
+    return None
+
+
+class _InstanceAssignmentCollector(ast.NodeVisitor):
+    def __init__(self, instance: str) -> None:
+        self.instance = instance
+        self.nodes: dict[str, ast.AST] = {}
+
+    def _record(self, target: ast.AST, node: ast.AST) -> None:
+        for name in _assigned_instance_attributes(target, self.instance):
+            self.nodes.setdefault(name, node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._record(target, node)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._record(node.target, node)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._record(node.target, node)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+class _ConstructorDispatchVisitor(ast.NodeVisitor):
+    def __init__(self, instance: str, methods: set[str]) -> None:
+        self.instance = instance
+        self.methods = methods
+        self.calls: list[tuple[ast.Call, str]] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        function = node.func
+        if (
+            isinstance(function, ast.Attribute)
+            and isinstance(function.value, ast.Name)
+            and function.value.id == self.instance
+            and function.attr in self.methods
+        ):
+            self.calls.append((node, function.attr))
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+class _AttributeExpressionVisitor(ast.NodeVisitor):
+    def __init__(
+        self,
+        *,
+        instance: str,
+        assigned: frozenset[str],
+        read_candidates: set[str],
+        shared_mutables: set[str],
+        first_reads: dict[str, ast.Attribute],
+        mutations: list[tuple[ast.AST, str]],
+    ) -> None:
+        self.instance = instance
+        self.assigned = assigned
+        self.read_candidates = read_candidates
+        self.shared_mutables = shared_mutables
+        self.first_reads = first_reads
+        self.mutations = mutations
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if (
+            isinstance(node.ctx, ast.Load)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == self.instance
+            and node.attr in self.read_candidates
+            and node.attr not in self.assigned
+        ):
+            self.first_reads.setdefault(node.attr, node)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute):
+            root = _root_instance_attribute(node.func.value, self.instance)
+            if (
+                root in self.shared_mutables
+                and root not in self.assigned
+                and node.func.attr in MUTATING_CONTAINER_METHODS
+            ):
+                self.mutations.append((node, root))
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+class _AttributeFlowAnalyzer:
+    def __init__(
+        self,
+        *,
+        instance: str,
+        read_candidates: set[str] | None = None,
+        shared_mutables: set[str] | None = None,
+    ) -> None:
+        self.instance = instance
+        self.read_candidates = read_candidates or set()
+        self.shared_mutables = shared_mutables or set()
+        self.first_reads: dict[str, ast.Attribute] = {}
+        self.mutations: list[tuple[ast.AST, str]] = []
+
+    def analyze(
+        self,
+        body: Sequence[ast.stmt],
+        assigned: frozenset[str] = frozenset(),
+    ) -> AttributeFlow:
+        current: frozenset[str] | None = assigned
+        returns: frozenset[str] | None = None
+        for statement in body:
+            if current is None:
+                break
+            flow = self._statement(statement, current)
+            returns = _merge_attribute_states(returns, flow.returns)
+            current = flow.fallthrough
+        return AttributeFlow(current, returns)
+
+    def _inspect(self, node: ast.AST | None, assigned: frozenset[str]) -> None:
+        if node is None:
+            return
+        visitor = _AttributeExpressionVisitor(
+            instance=self.instance,
+            assigned=assigned,
+            read_candidates=self.read_candidates,
+            shared_mutables=self.shared_mutables,
+            first_reads=self.first_reads,
+            mutations=self.mutations,
+        )
+        visitor.visit(node)
+
+    def _record_direct_read(
+        self,
+        target: ast.AST,
+        assigned: frozenset[str],
+    ) -> None:
+        if not isinstance(target, ast.Attribute):
+            return
+        names = _assigned_instance_attributes(target, self.instance)
+        for name in names & self.read_candidates - set(assigned):
+            self.first_reads.setdefault(name, target)
+
+    def _record_target_mutation(
+        self,
+        target: ast.AST,
+        assigned: frozenset[str],
+        node: ast.AST,
+    ) -> None:
+        if isinstance(target, ast.Starred):
+            self._record_target_mutation(target.value, assigned, node)
+            return
+        if isinstance(target, (ast.List, ast.Tuple)):
+            for element in target.elts:
+                self._record_target_mutation(element, assigned, node)
+            return
+        if not isinstance(target, ast.Subscript):
+            return
+        root = _root_instance_attribute(target, self.instance)
+        if root in self.shared_mutables and root not in assigned:
+            self.mutations.append((node, root))
+
+    def _assignment_flow(
+        self,
+        node: ast.Assign,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        self._inspect(node.value, assigned)
+        current = assigned
+        for target in node.targets:
+            self._inspect(target, current)
+            self._record_target_mutation(target, current, node)
+            current |= _assigned_instance_attributes(target, self.instance)
+        return AttributeFlow(current, None)
+
+    def _annotated_assignment_flow(
+        self,
+        node: ast.AnnAssign,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        self._inspect(node.value, assigned)
+        self._inspect(node.target, assigned)
+        if node.value is None:
+            return AttributeFlow(assigned, None)
+        self._record_target_mutation(node.target, assigned, node)
+        updated = assigned | _assigned_instance_attributes(node.target, self.instance)
+        return AttributeFlow(updated, None)
+
+    def _augmented_assignment_flow(
+        self,
+        node: ast.AugAssign,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        self._record_direct_read(node.target, assigned)
+        self._inspect(node.target, assigned)
+        self._inspect(node.value, assigned)
+        root = _root_instance_attribute(node.target, self.instance)
+        if root in self.shared_mutables and root not in assigned:
+            self.mutations.append((node, root))
+        updated = assigned | _assigned_instance_attributes(node.target, self.instance)
+        return AttributeFlow(updated, None)
+
+    def _delete_flow(
+        self,
+        node: ast.Delete,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        updated = set(assigned)
+        for target in node.targets:
+            self._record_direct_read(target, assigned)
+            self._inspect(target, assigned)
+            self._record_target_mutation(target, assigned, node)
+            updated.difference_update(
+                _assigned_instance_attributes(target, self.instance)
+            )
+        return AttributeFlow(frozenset(updated), None)
+
+    def _if_flow(
+        self,
+        node: ast.If,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        self._inspect(node.test, assigned)
+        truth = node.test.value if isinstance(node.test, ast.Constant) else None
+        if truth is True:
+            return self.analyze(node.body, assigned)
+        if truth is False:
+            return self.analyze(node.orelse, assigned)
+        body = self.analyze(node.body, assigned)
+        alternative = self.analyze(node.orelse, assigned)
+        return AttributeFlow(
+            _merge_attribute_states(body.fallthrough, alternative.fallthrough),
+            _merge_attribute_states(body.returns, alternative.returns),
+        )
+
+    def _match_flow(
+        self,
+        node: ast.Match,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        self._inspect(node.subject, assigned)
+        flows: list[AttributeFlow] = []
+        exhaustive = False
+        for case in node.cases:
+            self._inspect(case.guard, assigned)
+            flows.append(self.analyze(case.body, assigned))
+            exhaustive |= bool(
+                case.guard is None
+                and isinstance(case.pattern, ast.MatchAs)
+                and case.pattern.pattern is None
+            )
+        if not exhaustive:
+            flows.append(AttributeFlow(assigned, None))
+        return AttributeFlow(
+            _merge_attribute_states(*(flow.fallthrough for flow in flows)),
+            _merge_attribute_states(*(flow.returns for flow in flows)),
+        )
+
+    def _with_flow(
+        self,
+        node: ast.With | ast.AsyncWith,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        current = assigned
+        for item in node.items:
+            self._inspect(item.context_expr, current)
+            if item.optional_vars is not None:
+                self._inspect(item.optional_vars, current)
+                current |= _assigned_instance_attributes(
+                    item.optional_vars,
+                    self.instance,
+                )
+        return self.analyze(node.body, current)
+
+    def _loop_flow(
+        self,
+        node: ast.For | ast.AsyncFor | ast.While,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        body_state = assigned
+        if isinstance(node, (ast.For, ast.AsyncFor)):
+            self._inspect(node.iter, assigned)
+            self._inspect(node.target, assigned)
+            self._record_target_mutation(node.target, assigned, node)
+            body_state |= _assigned_instance_attributes(node.target, self.instance)
+        else:
+            self._inspect(node.test, assigned)
+        body = self.analyze(node.body, body_state)
+        after_loop = _merge_attribute_states(assigned, body.fallthrough)
+        alternative = self.analyze(node.orelse, after_loop or frozenset())
+        return AttributeFlow(
+            alternative.fallthrough,
+            _merge_attribute_states(body.returns, alternative.returns),
+        )
+
+    def _try_flow(
+        self,
+        node: ast.Try | ast.TryStar,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        body = self.analyze(node.body, assigned)
+        normal = (
+            self.analyze(node.orelse, body.fallthrough)
+            if body.fallthrough is not None
+            else AttributeFlow(None, None)
+        )
+        handlers: list[AttributeFlow] = []
+        for handler in node.handlers:
+            self._inspect(handler.type, assigned)
+            handlers.append(self.analyze(handler.body, assigned))
+
+        fallthrough = _merge_attribute_states(
+            normal.fallthrough,
+            *(handler.fallthrough for handler in handlers),
+        )
+        returns = _merge_attribute_states(
+            body.returns,
+            normal.returns,
+            *(handler.returns for handler in handlers),
+        )
+        if not node.finalbody:
+            return AttributeFlow(fallthrough, returns)
+
+        normal_final = (
+            self.analyze(node.finalbody, fallthrough)
+            if fallthrough is not None
+            else AttributeFlow(None, None)
+        )
+        return_final = (
+            self.analyze(node.finalbody, returns)
+            if returns is not None
+            else AttributeFlow(None, None)
+        )
+        return AttributeFlow(
+            normal_final.fallthrough,
+            _merge_attribute_states(
+                normal_final.returns,
+                return_final.fallthrough,
+                return_final.returns,
+            ),
+        )
+
+    def _statement(
+        self,
+        node: ast.stmt,
+        assigned: frozenset[str],
+    ) -> AttributeFlow:
+        if isinstance(node, ast.Assign):
+            return self._assignment_flow(node, assigned)
+        if isinstance(node, ast.AnnAssign):
+            return self._annotated_assignment_flow(node, assigned)
+        if isinstance(node, ast.AugAssign):
+            return self._augmented_assignment_flow(node, assigned)
+        if isinstance(node, ast.Delete):
+            return self._delete_flow(node, assigned)
+        if isinstance(node, ast.If):
+            return self._if_flow(node, assigned)
+        if isinstance(node, ast.Match):
+            return self._match_flow(node, assigned)
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            return self._with_flow(node, assigned)
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            return self._loop_flow(node, assigned)
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            return self._try_flow(node, assigned)
+        if isinstance(node, ast.Return):
+            self._inspect(node.value, assigned)
+            return AttributeFlow(None, assigned)
+        if isinstance(node, ast.Raise):
+            self._inspect(node.exc, assigned)
+            self._inspect(node.cause, assigned)
+            return AttributeFlow(None, None)
+        if isinstance(node, (ast.Break, ast.Continue)):
+            return AttributeFlow(None, None)
+        self._inspect(node, assigned)
+        return AttributeFlow(assigned, None)
+
+
+def _bound_target_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _bound_target_names(target.value)
+    if isinstance(target, (ast.List, ast.Tuple)):
+        names: set[str] = set()
+        for element in target.elts:
+            names.update(_bound_target_names(element))
+        return names
+    return set()
+
+
+def _class_statement_bindings(node: ast.stmt) -> set[str]:
+    if isinstance(node, ast.Assign):
+        return {name for target in node.targets for name in _bound_target_names(target)}
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        return _bound_target_names(node.target)
+    if isinstance(node, ast.AugAssign):
+        return _bound_target_names(node.target)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.Import):
+        return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return {alias.asname or alias.name for alias in node.names}
+    return set()
+
+
+def _class_namespace_names(node: ast.ClassDef) -> set[str]:
+    names: set[str] = set()
+    for statement in node.body:
+        names.update(_class_statement_bindings(statement))
+        if isinstance(statement, ast.Delete):
+            for target in statement.targets:
+                names.difference_update(_bound_target_names(target))
+    return names
+
+
+def _class_methods(
+    node: ast.ClassDef,
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for statement in node.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods[statement.name] = statement
+            continue
+        for name in _class_statement_bindings(statement):
+            methods.pop(name, None)
+        if isinstance(statement, ast.Delete):
+            for target in statement.targets:
+                for name in _bound_target_names(target):
+                    methods.pop(name, None)
+    return methods
+
+
+def _classvar_names(
+    node: ast.ClassDef,
+    aliases: dict[str, str],
+) -> set[str]:
+    names: set[str] = set()
+    for statement in node.body:
+        if not isinstance(statement, ast.AnnAssign):
+            continue
+        annotation = statement.annotation
+        target = (
+            annotation.value if isinstance(annotation, ast.Subscript) else annotation
+        )
+        raw_name = _expression_name(target)
+        qualified_name = _resolve_imported_name(raw_name, aliases)
+        if raw_name.split(".")[-1] == "ClassVar" or qualified_name == "typing.ClassVar":
+            names.update(_assigned_names(statement.target))
+    return names
+
+
+def _class_attribute_values(node: ast.ClassDef) -> dict[str, ast.AST]:
+    values: dict[str, ast.AST] = {}
+    for statement in node.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                for name in _bound_target_names(target):
+                    values[name] = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            for name in _bound_target_names(statement.target):
+                values[name] = statement.value
+        elif isinstance(
+            statement,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.Import,
+                ast.ImportFrom,
+            ),
+        ):
+            for name in _class_statement_bindings(statement):
+                values.pop(name, None)
+        elif isinstance(statement, ast.Delete):
+            for target in statement.targets:
+                for name in _bound_target_names(target):
+                    values.pop(name, None)
+    return values
+
+
+def _mutable_container_kind(
+    node: ast.AST,
+    shadowed_names: set[str] | frozenset[str] = frozenset(),
+) -> str | None:
+    if isinstance(node, (ast.List, ast.ListComp)):
+        return "list"
+    if isinstance(node, (ast.Dict, ast.DictComp)):
+        return "dict"
+    if isinstance(node, (ast.Set, ast.SetComp)):
+        return "set"
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"dict", "list", "set"}
+        and node.func.id not in shadowed_names
+    ):
+        return node.func.id
+    return None
+
+
+def _analyze_constructor(
+    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    aliases: dict[str, str],
+) -> tuple[
+    ast.FunctionDef | ast.AsyncFunctionDef | None,
+    str | None,
+    dict[str, ast.AST],
+    frozenset[str] | None,
+]:
+    constructor = methods.get("__init__")
+    if constructor is None or not _is_instance_method(constructor, aliases):
+        return constructor, None, {}, frozenset()
+    instance = _first_positional_parameter(constructor)
+    if instance is None:
+        return constructor, None, {}, frozenset()
+
+    collector = _InstanceAssignmentCollector(instance)
+    for statement in constructor.body:
+        collector.visit(statement)
+    flow = _AttributeFlowAnalyzer(instance=instance).analyze(constructor.body)
+    initialized = _merge_attribute_states(flow.fallthrough, flow.returns)
+    return constructor, instance, collector.nodes, initialized
+
+
 class SlopVisitor(ast.NodeVisitor):
     """Collect pyclichecker findings from a parsed module."""
 
@@ -730,6 +1397,13 @@ class SlopVisitor(ast.NodeVisitor):
         self.config = config
         self.module_body = tuple(module_body)
         self.module_aliases = module_aliases
+        module_bindings = _collect_body_bindings(module_body)
+        self.shadowed_container_names = {
+            name
+            for name in {"dict", "list", "set"}
+            if name in module_bindings
+            or (name in module_aliases and module_aliases[name] != f"builtins.{name}")
+        }
         self.findings: list[Finding] = []
         self.functions: list[FunctionRecord] = []
         self.scope: list[str] = []
@@ -789,11 +1463,175 @@ class SlopVisitor(ast.NodeVisitor):
         is_protocol = any(
             _expression_name(base).split(".")[-1] == "Protocol" for base in node.bases
         )
+        if not is_protocol:
+            self._check_class_correctness(node)
         self.scope.append(node.name)
         self.protocol_stack.append(is_protocol)
         self.generic_visit(node)
         self.protocol_stack.pop()
         self.scope.pop()
+
+    def _check_class_correctness(self, node: ast.ClassDef) -> None:
+        methods = _class_methods(node)
+        constructor, instance, assignments, initialized = _analyze_constructor(
+            methods,
+            self.alias_stack[-1],
+        )
+        class_name = ".".join((*self.scope, node.name))
+        self._check_overridable_init_calls(
+            node,
+            methods,
+            constructor,
+            instance,
+            class_name,
+        )
+        self._check_conditional_instance_state(
+            node,
+            methods,
+            constructor,
+            instance,
+            assignments,
+            initialized,
+            class_name,
+        )
+        self._check_shared_mutable_class_state(
+            node,
+            methods,
+            constructor,
+            initialized,
+            class_name,
+        )
+
+    def _check_overridable_init_calls(
+        self,
+        class_node: ast.ClassDef,
+        methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+        constructor: ast.FunctionDef | ast.AsyncFunctionDef | None,
+        instance: str | None,
+        class_name: str,
+    ) -> None:
+        if (
+            constructor is None
+            or instance is None
+            or _has_decorator(class_node, "final", self.alias_stack[-1])
+        ):
+            return
+        overridable = {
+            name
+            for name, method in methods.items()
+            if not name.startswith("__")
+            and not _has_decorator(method, "final", self.alias_stack[-1])
+        }
+        visitor = _ConstructorDispatchVisitor(instance, overridable)
+        for statement in constructor.body:
+            visitor.visit(statement)
+        for call, method_name in visitor.calls:
+            self.add_finding(
+                call,
+                "SLP015",
+                f"`{class_name}.__init__` calls overridable `{method_name}`; "
+                "initialize state directly or make the method private or final",
+            )
+
+    def _check_conditional_instance_state(
+        self,
+        class_node: ast.ClassDef,
+        methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+        constructor: ast.FunctionDef | ast.AsyncFunctionDef | None,
+        instance: str | None,
+        assignments: dict[str, ast.AST],
+        initialized: frozenset[str] | None,
+        class_name: str,
+    ) -> None:
+        if constructor is None or instance is None or initialized is None:
+            return
+        if {"__getattr__", "__getattribute__"} & methods.keys():
+            return
+        fallbacks = _class_namespace_names(class_node)
+        candidates = set(assignments) - set(initialized) - fallbacks
+        if not candidates:
+            return
+
+        first_reads: dict[str, ast.Attribute] = {}
+        for method in sorted(methods.values(), key=lambda item: item.lineno):
+            if method is constructor or not _is_instance_method(
+                method,
+                self.alias_stack[-1],
+            ):
+                continue
+            method_instance = _first_positional_parameter(method)
+            if method_instance is None:
+                continue
+            analyzer = _AttributeFlowAnalyzer(
+                instance=method_instance,
+                read_candidates=candidates,
+            )
+            analyzer.analyze(method.body)
+            for name, read in analyzer.first_reads.items():
+                if not self._is_suppressed(read.lineno, "SLP016"):
+                    first_reads.setdefault(name, read)
+
+        for name, read in sorted(
+            first_reads.items(),
+            key=lambda item: (item[1].lineno, item[1].col_offset, item[0]),
+        ):
+            self.add_finding(
+                read,
+                "SLP016",
+                f"`{class_name}.{name}` may be missing because `__init__` does "
+                "not assign it on every successful path; initialize it unconditionally",
+            )
+
+    def _check_shared_mutable_class_state(
+        self,
+        class_node: ast.ClassDef,
+        methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+        constructor: ast.FunctionDef | ast.AsyncFunctionDef | None,
+        initialized: frozenset[str] | None,
+        class_name: str,
+    ) -> None:
+        if constructor is not None and initialized is None:
+            return
+        classvars = _classvar_names(class_node, self.alias_stack[-1])
+        shadowed_names = self.shadowed_container_names | (
+            _class_namespace_names(class_node) & {"dict", "list", "set"}
+        )
+        shared_mutables = {
+            name
+            for name, value in _class_attribute_values(class_node).items()
+            if name not in classvars
+            and _mutable_container_kind(value, shadowed_names) is not None
+        }
+        if not shared_mutables or "__getattribute__" in methods:
+            return
+
+        for method in sorted(methods.values(), key=lambda item: item.lineno):
+            if not _is_instance_method(method, self.alias_stack[-1]):
+                continue
+            method_instance = _first_positional_parameter(method)
+            if method_instance is None:
+                continue
+            initial = (
+                frozenset() if method is constructor else initialized or frozenset()
+            )
+            analyzer = _AttributeFlowAnalyzer(
+                instance=method_instance,
+                shared_mutables=shared_mutables,
+            )
+            analyzer.analyze(method.body, initial)
+            reported: set[tuple[int, str]] = set()
+            for mutation, name in analyzer.mutations:
+                key = (id(mutation), name)
+                if key in reported:
+                    continue
+                reported.add(key)
+                self.add_finding(
+                    mutation,
+                    "SLP017",
+                    f"`{class_name}.{name}` is shared mutable class state mutated "
+                    "through an instance; initialize it in `__init__` or mark "
+                    "intentional shared state as `ClassVar`",
+                )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._visit_function(node, is_async=False)
