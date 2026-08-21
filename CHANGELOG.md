@@ -13,6 +13,8 @@
   arguments, and function defaults.
 - Added import-alias, shadowing, delegation, suppression, and false-positive
   coverage for the new checks.
+- Added a version-pinned Agent Skill and portable `AGENTS.md` workflow for
+  running strict changed-file and repository gates through `uvx`.
 - Added MIT licensing, public project metadata, contribution guidance, and
   pinned GitHub Actions validation.
 

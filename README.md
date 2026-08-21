@@ -37,7 +37,8 @@ pyclichecker . --format github
 For a one-off run without installing the command:
 
 ```bash
-uvx --from git+https://github.com/ktreharrison/pyclichecker.git pyclichecker .
+uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.3.0 \
+  pyclichecker .
 ```
 
 ## Reading a result
@@ -129,10 +130,16 @@ failing, and `--fail-on never` reports all findings without failing.
 
 ## Agent use
 
-Agents should use JSON when they need stable structured fields:
+The repository includes a reusable
+[`pyclichecker` Agent Skill](skills/pyclichecker/SKILL.md). Skill-aware agents
+can load that folder and run the linter through `uvx` without permanently
+installing the package.
+
+Agents should use the pinned release and JSON output for stable results:
 
 ```bash
-pyclichecker changed_file.py --format json
+uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.3.0 \
+  pyclichecker changed_file.py --format json
 ```
 
 JSON output contains the package version, number of files checked, findings,
@@ -146,6 +153,22 @@ one explicit rule.
 An agent should finish only after the same command returns `0`, or after it
 records why each remaining finding is intentional. It should never treat exit
 `2` as a clean result.
+
+For agents that do not load skills, add this portable contract to the
+project's `AGENTS.md`:
+
+```markdown
+## Python quality gate
+
+After creating or changing Python code:
+
+1. Run pyclichecker on every changed Python file:
+   `uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.3.0 pyclichecker changed_file.py --format json`
+2. Treat exit 1 as findings to fix and exit 2 as an incomplete scan.
+3. Fix findings and rerun relevant tests. Do not add broad suppressions.
+4. Run the final repository gate with the same command, replacing
+   `changed_file.py` with `.`, and finish only when it exits 0.
+```
 
 ## Development
 

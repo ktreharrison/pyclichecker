@@ -40,6 +40,7 @@ source-include = [
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "LICENSE",
+    "skills/**",
     "tests/**",
     "uv.lock",
 ]

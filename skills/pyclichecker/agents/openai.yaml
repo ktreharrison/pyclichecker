@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pyclichecker"
+  short_description: "Fix high-signal defects in Python changes"
+  default_prompt: "Use $pyclichecker to lint my Python changes, fix findings, and run the final repository gate."
