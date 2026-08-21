@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Python 3.14
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Install locked development environment
+        run: uv sync --locked
+
+      - name: Run unit tests
+        run: uv run python -m unittest discover -v
+
+      - name: Run Ruff
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Run pyclichecker on itself
+        run: uv run pyclichecker src tests
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Smoke-test built wheel
+        run: |
+          wheel="$(find dist -name '*.whl' -print -quit)"
+          uvx --from "$wheel" pyclichecker --version
+          uvx --from "$wheel" pyclichecker src tests
