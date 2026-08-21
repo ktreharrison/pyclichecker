@@ -474,9 +474,10 @@ class RuleTests(unittest.TestCase):
             class Loader:
                 def __init__(instance):
                     instance.configure()
+                    instance.ready = True
 
                 def configure(instance):
-                    instance.ready = True
+                    return None
 
             class InheritedHook:
                 def __init__(self):
@@ -542,6 +543,37 @@ class RuleTests(unittest.TestCase):
                     self.ready = True
 
                 prepare = replacement
+            """)
+
+        self.assertNotIn("SLP015", [finding.code for finding in findings])
+
+    def test_overridable_init_call_accepts_completed_state(self) -> None:
+        findings = self.lint("""
+            class InitializedBeforeHook:
+                def __init__(self):
+                    self.ready = False
+                    self.prepare()
+
+                def prepare(self):
+                    return self.ready
+
+            class CompleteBranches:
+                def __init__(self, active):
+                    if active:
+                        self.state = "active"
+                    else:
+                        self.state = "idle"
+                    self.prepare()
+
+                def prepare(self):
+                    return self.state
+
+            class HookOnly:
+                def __init__(self):
+                    self.prepare()
+
+                def prepare(self):
+                    return None
             """)
 
         self.assertNotIn("SLP015", [finding.code for finding in findings])
@@ -660,6 +692,89 @@ class RuleTests(unittest.TestCase):
             """)
 
         self.assertNotIn("SLP016", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_accepts_guarded_reads(self) -> None:
+        findings = self.lint("""
+            class GuardedState:
+                def __init__(self, supplied):
+                    if supplied:
+                        self.optional = supplied
+
+                def direct_guard(self):
+                    if hasattr(self, "optional"):
+                        return self.optional
+                    return None
+
+                def inverse_guard(self):
+                    if not hasattr(self, "optional"):
+                        return None
+                    return self.optional
+
+                def expression_guard(self):
+                    return self.optional if hasattr(self, "optional") else None
+
+            class LazyState:
+                def __init__(self, supplied):
+                    if supplied:
+                        self.optional = supplied
+
+                def read(self):
+                    try:
+                        return self.optional
+                    except AttributeError:
+                        return None
+
+            class TestAndSetDefault:
+                def __init__(self, label):
+                    if not hasattr(self, "label"):
+                        self.label = label
+
+                def read(self):
+                    return self.label
+            """)
+
+        self.assertNotIn("SLP016", [finding.code for finding in findings])
+
+    def test_conditional_instance_state_keeps_unguarded_reads(self) -> None:
+        findings = self.lint("""
+            class PartiallyGuardedState:
+                def __init__(self, supplied):
+                    if supplied:
+                        self.optional = supplied
+
+                def read(self):
+                    if hasattr(self, "optional"):
+                        audit(self.optional)
+                    return self.optional
+            """)
+
+        state_findings = [finding for finding in findings if finding.code == "SLP016"]
+        self.assertEqual(len(state_findings), 1)
+        self.assertEqual(state_findings[0].line, 10)
+
+    def test_conditional_instance_state_does_not_trust_shadowed_guards(self) -> None:
+        findings = self.lint("""
+            class ShadowedGuards:
+                def __init__(self, supplied):
+                    if supplied:
+                        self.optional = supplied
+                        self.lazy = supplied
+
+                def custom_hasattr(self, hasattr):
+                    if hasattr(self, "optional"):
+                        return self.optional
+                    return None
+
+                def custom_exception(self, AttributeError):
+                    try:
+                        return self.lazy
+                    except AttributeError:
+                        return None
+            """)
+
+        state_findings = [finding for finding in findings if finding.code == "SLP016"]
+        self.assertEqual(len(state_findings), 2)
+        self.assertEqual([finding.line for finding in state_findings], [10, 15])
 
     def test_conditional_instance_state_handles_returning_try(self) -> None:
         findings = self.lint("""
@@ -813,6 +928,20 @@ class RuleTests(unittest.TestCase):
                 def add(self, item):
                     self.entries.append(item)  # noqa: SLP017
             """)
+
+        self.assertNotIn("SLP017", [finding.code for finding in findings])
+
+    def test_shared_mutable_class_state_ignores_test_recorders(self) -> None:
+        findings = self.lint(
+            """
+            class RecordingBackend:
+                calls = []
+
+                def send(self, message):
+                    self.calls.append(message)
+            """,
+            path="tests/test_backend.py",
+        )
 
         self.assertNotIn("SLP017", [finding.code for finding in findings])
 

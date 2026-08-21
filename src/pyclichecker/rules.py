@@ -825,6 +825,118 @@ def _root_instance_attribute(node: ast.AST, instance: str) -> str | None:
     return None
 
 
+def _is_hasattr_check(node: ast.AST, instance: str, attribute: str) -> bool:
+    return bool(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "hasattr"
+        and len(node.args) == 2
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == instance
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == attribute
+    )
+
+
+def _condition_guarantees_attribute(
+    node: ast.AST,
+    *,
+    instance: str,
+    attribute: str,
+    truth: bool,
+) -> bool:
+    if _is_hasattr_check(node, instance, attribute):
+        return truth
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _condition_guarantees_attribute(
+            node.operand,
+            instance=instance,
+            attribute=attribute,
+            truth=not truth,
+        )
+    if isinstance(node, ast.BoolOp):
+        values_have_fixed_truth = truth if isinstance(node.op, ast.And) else not truth
+        if values_have_fixed_truth:
+            return any(
+                _condition_guarantees_attribute(
+                    value,
+                    instance=instance,
+                    attribute=attribute,
+                    truth=truth,
+                )
+                for value in node.values
+            )
+    return False
+
+
+def _handler_catches_attribute_error(node: ast.ExceptHandler) -> bool:
+    if isinstance(node.type, ast.Tuple):
+        exceptions = node.type.elts
+    else:
+        exceptions = (node.type,)
+    return any(
+        _expression_name(exception) == "AttributeError" for exception in exceptions
+    )
+
+
+def _attribute_read_is_guarded(
+    node: ast.Attribute,
+    *,
+    instance: str,
+    attribute: str,
+    trust_hasattr: bool,
+    trust_attribute_error: bool,
+) -> bool:
+    current: ast.AST = node
+    parent = _parent_node(current)
+    while parent is not None:
+        if trust_hasattr and isinstance(parent, (ast.If, ast.While)):
+            if current in parent.body and _condition_guarantees_attribute(
+                parent.test,
+                instance=instance,
+                attribute=attribute,
+                truth=True,
+            ):
+                return True
+            if (
+                isinstance(parent, ast.If)
+                and current in parent.orelse
+                and _condition_guarantees_attribute(
+                    parent.test,
+                    instance=instance,
+                    attribute=attribute,
+                    truth=False,
+                )
+            ):
+                return True
+        if trust_hasattr and isinstance(parent, ast.IfExp):
+            if current is parent.body and _condition_guarantees_attribute(
+                parent.test,
+                instance=instance,
+                attribute=attribute,
+                truth=True,
+            ):
+                return True
+            if current is parent.orelse and _condition_guarantees_attribute(
+                parent.test,
+                instance=instance,
+                attribute=attribute,
+                truth=False,
+            ):
+                return True
+        if (
+            trust_attribute_error
+            and isinstance(parent, (ast.Try, ast.TryStar))
+            and current in parent.body
+            and any(_handler_catches_attribute_error(item) for item in parent.handlers)
+        ):
+            return True
+        current = parent
+        parent = _parent_node(current)
+    return False
+
+
 class _InstanceAssignmentCollector(ast.NodeVisitor):
     def __init__(self, instance: str) -> None:
         self.instance = instance
@@ -901,6 +1013,8 @@ class _AttributeExpressionVisitor(ast.NodeVisitor):
         shared_mutables: set[str],
         first_reads: dict[str, ast.Attribute],
         mutations: list[tuple[ast.AST, str]],
+        trust_hasattr: bool,
+        trust_attribute_error: bool,
     ) -> None:
         self.instance = instance
         self.assigned = assigned
@@ -908,6 +1022,8 @@ class _AttributeExpressionVisitor(ast.NodeVisitor):
         self.shared_mutables = shared_mutables
         self.first_reads = first_reads
         self.mutations = mutations
+        self.trust_hasattr = trust_hasattr
+        self.trust_attribute_error = trust_attribute_error
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if (
@@ -916,6 +1032,13 @@ class _AttributeExpressionVisitor(ast.NodeVisitor):
             and node.value.id == self.instance
             and node.attr in self.read_candidates
             and node.attr not in self.assigned
+            and not _attribute_read_is_guarded(
+                node,
+                instance=self.instance,
+                attribute=node.attr,
+                trust_hasattr=self.trust_hasattr,
+                trust_attribute_error=self.trust_attribute_error,
+            )
         ):
             self.first_reads.setdefault(node.attr, node)
         self.generic_visit(node)
@@ -951,10 +1074,14 @@ class _AttributeFlowAnalyzer:
         instance: str,
         read_candidates: set[str] | None = None,
         shared_mutables: set[str] | None = None,
+        trust_hasattr: bool = False,
+        trust_attribute_error: bool = False,
     ) -> None:
         self.instance = instance
         self.read_candidates = read_candidates or set()
         self.shared_mutables = shared_mutables or set()
+        self.trust_hasattr = trust_hasattr
+        self.trust_attribute_error = trust_attribute_error
         self.first_reads: dict[str, ast.Attribute] = {}
         self.mutations: list[tuple[ast.AST, str]] = []
 
@@ -983,6 +1110,8 @@ class _AttributeFlowAnalyzer:
             shared_mutables=self.shared_mutables,
             first_reads=self.first_reads,
             mutations=self.mutations,
+            trust_hasattr=self.trust_hasattr,
+            trust_attribute_error=self.trust_attribute_error,
         )
         visitor.visit(node)
 
@@ -1082,8 +1211,30 @@ class _AttributeFlowAnalyzer:
             return self.analyze(node.body, assigned)
         if truth is False:
             return self.analyze(node.orelse, assigned)
-        body = self.analyze(node.body, assigned)
-        alternative = self.analyze(node.orelse, assigned)
+        body_known = frozenset(
+            name
+            for name in self.read_candidates
+            if self.trust_hasattr
+            and _condition_guarantees_attribute(
+                node.test,
+                instance=self.instance,
+                attribute=name,
+                truth=True,
+            )
+        )
+        alternative_known = frozenset(
+            name
+            for name in self.read_candidates
+            if self.trust_hasattr
+            and _condition_guarantees_attribute(
+                node.test,
+                instance=self.instance,
+                attribute=name,
+                truth=False,
+            )
+        )
+        body = self.analyze(node.body, assigned | body_known)
+        alternative = self.analyze(node.orelse, assigned | alternative_known)
         return AttributeFlow(
             _merge_attribute_states(body.fallthrough, alternative.fallthrough),
             _merge_attribute_states(body.returns, alternative.returns),
@@ -1230,6 +1381,21 @@ class _AttributeFlowAnalyzer:
             return AttributeFlow(None, None)
         self._inspect(node, assigned)
         return AttributeFlow(assigned, None)
+
+
+class _ConstructorDispatchAnalyzer(_AttributeFlowAnalyzer):
+    def __init__(self, *, instance: str, methods: set[str]) -> None:
+        super().__init__(instance=instance)
+        self.methods = methods
+        self.calls: list[tuple[ast.Call, str, frozenset[str]]] = []
+
+    def _inspect(self, node: ast.AST | None, assigned: frozenset[str]) -> None:
+        if node is None:
+            return
+        visitor = _ConstructorDispatchVisitor(self.instance, self.methods)
+        visitor.visit(node)
+        for call, method_name in visitor.calls:
+            self.calls.append((call, method_name, assigned))
 
 
 def _bound_target_names(target: ast.AST) -> set[str]:
@@ -1398,6 +1564,7 @@ class SlopVisitor(ast.NodeVisitor):
         self.module_body = tuple(module_body)
         self.module_aliases = module_aliases
         module_bindings = _collect_body_bindings(module_body)
+        self.module_bindings = module_bindings
         self.shadowed_container_names = {
             name
             for name in {"dict", "list", "set"}
@@ -1483,6 +1650,7 @@ class SlopVisitor(ast.NodeVisitor):
             methods,
             constructor,
             instance,
+            initialized,
             class_name,
         )
         self._check_conditional_instance_state(
@@ -1508,11 +1676,13 @@ class SlopVisitor(ast.NodeVisitor):
         methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
         constructor: ast.FunctionDef | ast.AsyncFunctionDef | None,
         instance: str | None,
+        initialized: frozenset[str] | None,
         class_name: str,
     ) -> None:
         if (
             constructor is None
             or instance is None
+            or not initialized
             or _has_decorator(class_node, "final", self.alias_stack[-1])
         ):
             return
@@ -1522,15 +1692,22 @@ class SlopVisitor(ast.NodeVisitor):
             if not name.startswith("__")
             and not _has_decorator(method, "final", self.alias_stack[-1])
         }
-        visitor = _ConstructorDispatchVisitor(instance, overridable)
-        for statement in constructor.body:
-            visitor.visit(statement)
-        for call, method_name in visitor.calls:
+        analyzer = _ConstructorDispatchAnalyzer(
+            instance=instance,
+            methods=overridable,
+        )
+        analyzer.analyze(constructor.body)
+        reported: set[int] = set()
+        for call, method_name, assigned in analyzer.calls:
+            if initialized <= assigned or id(call) in reported:
+                continue
+            reported.add(id(call))
             self.add_finding(
                 call,
                 "SLP015",
-                f"`{class_name}.__init__` calls overridable `{method_name}`; "
-                "initialize state directly or make the method private or final",
+                f"`{class_name}.__init__` calls overridable `{method_name}` "
+                "before initialization completes; initialize state before "
+                "dispatch or make the method private or final",
             )
 
     def _check_conditional_instance_state(
@@ -1548,7 +1725,26 @@ class SlopVisitor(ast.NodeVisitor):
         if {"__getattr__", "__getattribute__"} & methods.keys():
             return
         fallbacks = _class_namespace_names(class_node)
-        candidates = set(assignments) - set(initialized) - fallbacks
+        available = initialized
+        constructor_bindings = _collect_local_bindings(
+            constructor,
+            constructor.body,
+        )
+        if (
+            "hasattr" not in constructor_bindings
+            and "hasattr" not in self.module_bindings
+        ):
+            availability_analyzer = _AttributeFlowAnalyzer(
+                instance=instance,
+                read_candidates=set(assignments),
+                trust_hasattr=True,
+            )
+            availability_flow = availability_analyzer.analyze(constructor.body)
+            available = _merge_attribute_states(
+                availability_flow.fallthrough,
+                availability_flow.returns,
+            )
+        candidates = set(assignments) - set(available or ()) - fallbacks
         if not candidates:
             return
 
@@ -1562,9 +1758,20 @@ class SlopVisitor(ast.NodeVisitor):
             method_instance = _first_positional_parameter(method)
             if method_instance is None:
                 continue
+            local_bindings = _collect_local_bindings(method, method.body)
+            trust_hasattr = (
+                "hasattr" not in local_bindings
+                and "hasattr" not in self.module_bindings
+            )
+            trust_attribute_error = (
+                "AttributeError" not in local_bindings
+                and "AttributeError" not in self.module_bindings
+            )
             analyzer = _AttributeFlowAnalyzer(
                 instance=method_instance,
                 read_candidates=candidates,
+                trust_hasattr=trust_hasattr,
+                trust_attribute_error=trust_attribute_error,
             )
             analyzer.analyze(method.body)
             for name, read in analyzer.first_reads.items():
@@ -1590,7 +1797,9 @@ class SlopVisitor(ast.NodeVisitor):
         initialized: frozenset[str] | None,
         class_name: str,
     ) -> None:
-        if constructor is not None and initialized is None:
+        if _is_test_path(self.path) or (
+            constructor is not None and initialized is None
+        ):
             return
         classvars = _classvar_names(class_node, self.alias_stack[-1])
         shadowed_names = self.shadowed_container_names | (

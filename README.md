@@ -1,6 +1,7 @@
 # pyclichecker
 
 [![CI](https://github.com/ktreharrison/pyclichecker/actions/workflows/ci.yml/badge.svg)](https://github.com/ktreharrison/pyclichecker/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pyclichecker.svg)](https://pypi.org/project/pyclichecker/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `pyclichecker` is a read-only Python linter for high-signal defects and
@@ -12,15 +13,16 @@ occur in human-written code, and every finding should be judged in context.
 
 ## Quick start
 
-The project requires Python 3.14. Install the latest version from GitHub:
+The project requires Python 3.14. Run it directly without installing:
 
 ```bash
-uv tool install git+https://github.com/ktreharrison/pyclichecker.git
+uvx pyclichecker .
 ```
 
-The `pyclichecker` command then works from any directory:
+For a persistent command, install it with `uv`:
 
 ```bash
+uv tool install pyclichecker
 pyclichecker .
 ```
 
@@ -34,11 +36,10 @@ pyclichecker . --format json
 pyclichecker . --format github
 ```
 
-For a one-off run without installing the command:
+Pin a release when reproducibility matters:
 
 ```bash
-uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.4.0 \
-  pyclichecker .
+uvx pyclichecker@2.4.1 .
 ```
 
 ## Reading a result
@@ -79,9 +80,9 @@ A practical review loop is:
 | `SLP012` | warning | Path tied to one user's home directory | Use `Path.home()`, a project-relative path, or configuration. |
 | `SLP013` | warning | Known blocking API called inside async code | Use an async API or move the blocking call to a worker thread. |
 | `SLP014` | warning | Test has no explicit result or failure oracle | Assert an observable result or declare the expected exception or failure. |
-| `SLP015` | warning | Overridable method called from `__init__` | Initialize state directly, or make the hook private or final. |
+| `SLP015` | warning | Overridable method called before constructor state is initialized | Initialize state before dispatch, or make the hook private or final. |
 | `SLP016` | warning | Instance state initialized on only some constructor paths | Initialize the attribute unconditionally before other methods can read it. |
-| `SLP017` | warning | Shared mutable class state changed through an instance | Initialize it per instance or mark intentional shared state as `ClassVar`. |
+| `SLP017` | warning | Shared mutable class state changed through an instance in production code | Initialize it per instance or mark intentional shared state as `ClassVar`. |
 
 Rule selection accepts exact codes or prefixes:
 
@@ -141,8 +142,7 @@ installing the package.
 Agents should use the pinned release and JSON output for stable results:
 
 ```bash
-uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.4.0 \
-  pyclichecker changed_file.py --format json
+uvx pyclichecker@2.4.1 changed_file.py --format json
 ```
 
 JSON output contains the package version, number of files checked, findings,
@@ -166,7 +166,7 @@ project's `AGENTS.md`:
 After creating or changing Python code:
 
 1. Run pyclichecker on every changed Python file:
-   `uvx --from git+https://github.com/ktreharrison/pyclichecker.git@v2.4.0 pyclichecker changed_file.py --format json`
+   `uvx pyclichecker@2.4.1 changed_file.py --format json`
 2. Treat exit 1 as findings to fix and exit 2 as an incomplete scan.
 3. Fix findings and rerun relevant tests. Do not add broad suppressions.
 4. Run the final repository gate with the same command, replacing

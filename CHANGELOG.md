@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.4.1 - 2026-08-21
+
+- Calibrated `SLP015` to report overridable constructor dispatch only while
+  definitely initialized instance state is still pending.
+- Reduced `SLP016` false positives for `hasattr()` guards, test-and-set
+  initialization, and explicit `AttributeError` fallback.
+- Exempted test modules from `SLP017`, where shared mutable containers are
+  commonly intentional recorders and fixtures.
+- Added PyPI Trusted Publishing and documented the short
+  `uvx pyclichecker .` command.
+- Updated the bundled Agent Skill to use the pinned PyPI release.
+
 ## 2.4.0 - 2026-08-21
 
 - Added `SLP015` for constructor calls that dispatch to overridable same-class

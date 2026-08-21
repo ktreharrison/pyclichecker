@@ -105,7 +105,8 @@ RULES = {
             "SLP015",
             "warning",
             "overridable-init-call",
-            "Constructor calls a same-class method that subclasses can override.",
+            "Constructor dispatches to an overridable same-class method before "
+            "instance state initialization is complete.",
         ),
         Rule(
             "SLP016",
