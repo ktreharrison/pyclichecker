@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.2 - 2026-08-21
+
+- Added Ubuntu, macOS, and Windows CI coverage for tests, static checks,
+  package builds, and installed-wheel smoke tests.
+- Made release retries duplicate-aware by checking PyPI before uploading an
+  immutable distribution file.
+- Updated the bundled Agent Skill and documentation to pin version 2.4.2.
+
 ## 2.4.1 - 2026-08-21
 
 - Calibrated `SLP015` to report overridable constructor dispatch only while

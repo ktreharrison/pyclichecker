@@ -52,7 +52,8 @@ posting.
 3. Merge the release commit to `main` and create a GitHub release tagged
    `v<version>`.
 4. The `publish.yml` workflow verifies the tag, rebuilds and smoke-tests the
-   archives, then publishes them to PyPI through Trusted Publishing.
+   archives, checks PyPI for matching immutable files, then publishes any new
+   files through Trusted Publishing.
 
 The publishing job uses GitHub's short-lived OIDC identity. Do not add a PyPI
 API token to repository secrets.

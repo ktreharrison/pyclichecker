@@ -13,8 +13,12 @@ concurrency:
 
 jobs:
   quality:
-    name: Python 3.14
-    runs-on: ubuntu-latest
+    name: Python 3.14 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
 
     steps:
@@ -45,8 +49,20 @@ jobs:
       - name: Build distributions
         run: uv build
 
+      - name: Locate built wheel
+        id: wheel
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, found {len(wheels)}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"path={wheels[0].as_posix()}", file=output)
+
       - name: Smoke-test built wheel
         run: |
-          wheel="$(find dist -name '*.whl' -print -quit)"
-          uvx --from "$wheel" pyclichecker --version
-          uvx --from "$wheel" pyclichecker src tests
+          uvx --from "${{ steps.wheel.outputs.path }}" pyclichecker --version
+          uvx --from "${{ steps.wheel.outputs.path }}" pyclichecker src tests

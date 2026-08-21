@@ -77,4 +77,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
 
       - name: Publish distributions
-        run: uv publish --trusted-publishing always
+        run: >-
+          uv publish
+          --trusted-publishing always
+          --check-url https://pypi.org/simple

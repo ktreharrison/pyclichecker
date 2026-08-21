@@ -8,10 +8,10 @@ description: Run pyclichecker as a strict Python quality gate after creating, ed
 Use the pinned release for reproducible results:
 
 ```bash
-uvx pyclichecker@2.4.1 changed_file.py --format json
+uvx pyclichecker@2.4.2 changed_file.py --format json
 ```
 
-Keep `2.4.1` pinned. Do not silently switch the skill to an unpinned release.
+Keep `2.4.2` pinned. Do not silently switch the skill to an unpinned release.
 
 ## Workflow
 
@@ -28,7 +28,7 @@ Keep `2.4.1` pinned. Do not silently switch the skill to an unpinned release.
 6. From the repository root, run the final gate:
 
    ```bash
-   uvx pyclichecker@2.4.1 . --format json
+   uvx pyclichecker@2.4.2 . --format json
    ```
 
 7. Finish only after the final gate exits `0`. If unrelated pre-existing
