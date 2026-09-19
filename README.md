@@ -13,6 +13,24 @@ source with Python's AST and token APIs and has no runtime dependencies.
 It is a code-quality tool, not an AI-authorship detector. The same finding can
 occur in human-written code, and every finding should be judged in context.
 
+## Where it fits
+
+`pyclichecker` belongs alongside general-purpose formatters, linters, type
+checkers, and tests. It does not replace them.
+
+| Tool | Primary role | Relationship to `pyclichecker` |
+|---|---|---|
+| [Ruff](https://docs.astral.sh/ruff/) | Broad Python linting and formatting | Use Ruff for style, imports, modernization, common bug patterns, and formatting. `pyclichecker` concentrates on a smaller set of behavioral and path-sensitive risks. |
+| [Pyright](https://github.com/microsoft/pyright) | Static type checking | Use Pyright to validate type compatibility and typed interfaces. `pyclichecker` can report selected runtime-quality risks even when a project has few annotations. |
+| [ty](https://docs.astral.sh/ty/) | Static type checking and language services | Use ty for type analysis. Its role overlaps with Pyright rather than with most `pyclichecker` rules. |
+| [Black](https://black.readthedocs.io/) | Deterministic Python formatting | Use Black when it is the project's formatter. `pyclichecker` never rewrites formatting. |
+| `pyclichecker` | Focused AST and control-flow checks | Use it for swallowed failures, unchecked external operations, missing postconditions, fragile constructor state, assertion-free tests, and related generated or rushed-code risks. |
+
+A practical stack is one formatter, Ruff, one type checker, meaningful tests,
+and `pyclichecker`. The
+[differential corpus](tests/corpus/README.md) records examples that distinguish
+the tools and examples where their findings overlap.
+
 ## Quick start
 
 The project requires Python 3.14. Run it directly without installing:
@@ -61,6 +79,25 @@ A practical review loop is:
 4. Run the same command again.
 5. Suppress only the specific rule when the code is intentionally exceptional.
 
+JSON findings include a confidence level, evidence statements, related source
+locations, and a stable fingerprint:
+
+```json
+{
+  "code": "SLP009",
+  "confidence": "high",
+  "evidence": [
+    "resolved call is `subprocess.run`",
+    "no return-code check or deliberate result delegation covers every continuation"
+  ],
+  "related_locations": [],
+  "fingerprint": "v1:..."
+}
+```
+
+Confidence describes how strongly the analyzer established the reported code
+pattern. It does not prove that the behavior is unintended.
+
 ## Rules
 
 `pyclichecker --list-rules` reports these rules:
@@ -85,6 +122,7 @@ A practical review loop is:
 | `SLP015` | warning | Overridable method called before constructor state is initialized | Initialize state before dispatch, or make the hook private or final. |
 | `SLP016` | warning | Instance state initialized on only some constructor paths | Initialize the attribute unconditionally before other methods can read it. |
 | `SLP017` | warning | Shared mutable class state changed through an instance in production code | Initialize it per instance or mark intentional shared state as `ClassVar`. |
+| `SLP018` | warning | Return status from `os.system` or `subprocess.call` is discarded | Inspect or return the status, or use a raising subprocess API. |
 
 Rule selection accepts exact codes or prefixes:
 
@@ -101,6 +139,27 @@ For a first pass, fix `error` findings before reviewing `warning` findings.
 Warnings are prompts for engineering judgment, not proof that the code is
 wrong.
 
+## Baselines for established repositories
+
+Create a baseline from a complete JSON run:
+
+```bash
+pyclichecker . --format json --fail-on never > .pyclichecker-baseline.json
+```
+
+Confirm that command exits `0`, then fail only on findings that are not present
+in the baseline:
+
+```bash
+pyclichecker . --baseline .pyclichecker-baseline.json
+```
+
+AST-backed fingerprints use the rule, normalized path, enclosing scope, and
+normalized AST content rather than line numbers. Syntax-error fingerprints use
+the parser message and offending source line. Moving unchanged code within a
+file therefore does not make an existing finding new. Duplicate fingerprints
+are counted, so adding another copy of an existing defect is still reported.
+
 ## Review coverage and performance
 
 `pyclichecker` complements, rather than replaces, general-purpose quality
@@ -108,6 +167,8 @@ tools. This repository also gates changes with Ruff, strict mypy, Bandit,
 pip-audit, unit tests, and branch coverage. See
 [Review coverage and limits](https://github.com/ktreharrison/pyclichecker/blob/main/docs/review-coverage.md)
 for the mapping to the Real Python review and agentic-engineering workflows.
+See [Flow analysis](docs/flow-analysis.md) for the implementation model behind
+the path-sensitive rules.
 
 Performance coverage is deliberately narrow. `SLP013` catches selected
 blocking calls in async code, and Ruff's `PERF` rules catch known local
@@ -163,12 +224,16 @@ uvx pyclichecker@2.4.3 changed_file.py --format json
 ```
 
 JSON output contains the package version, number of files checked, findings,
-and operational errors. Each finding includes path, line, column, code,
-severity, and message.
+baseline metadata, and operational errors. Each finding includes path, line,
+column, code, severity, confidence, message, evidence, related locations, and
+a stable fingerprint.
 
 Treat exit `1` as work to review and exit `2` as a broken or incomplete scan.
 Fix findings before adding suppressions, and keep every suppression scoped to
 one explicit rule.
+
+Treat findings or review claims from another agent as hypotheses until source
+inspection, reproduction, tests, or another independent check verifies them.
 
 An agent should finish only after the same command returns `0`, or after it
 records why each remaining finding is intentional. It should never treat exit
@@ -199,6 +264,7 @@ and dependency-audit gates:
 ```bash
 uv sync --locked
 uv run python -m unittest discover -v
+uv run python -m tests.corpus_runner
 uv run coverage erase
 uv run coverage run -m unittest discover -v
 uv run coverage report
@@ -215,8 +281,8 @@ uvx --from . pyclichecker --version
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for rule and pull-request requirements.
 
-The implementation has been exercised on macOS with CPython 3.14. The GitHub
-Actions workflow is configured to run the complete validation suite on Linux.
+The GitHub Actions workflow runs the complete validation suite with CPython
+3.14 on Linux, macOS, and Windows.
 
 ## License
 

@@ -4,8 +4,10 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from pyclichecker._version import VERSION
+from pyclichecker.baseline import apply_baseline, load_baseline
 from pyclichecker.config import LintConfig, parse_rule_codes
 from pyclichecker.diagnostics import RULES, Finding
 from pyclichecker.discovery import discover_python_files, lint_files
@@ -120,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="warning",
         help="minimum severity that produces exit 1",
     )
+    parser.add_argument(
+        "--baseline",
+        metavar="PATH",
+        help="report and fail only on findings absent from a prior JSON result",
+    )
     _add_threshold_arguments(parser)
     parser.add_argument(
         "--list-rules",
@@ -140,6 +147,7 @@ def _render_text(
     *,
     files_checked: int,
     errors: Sequence[str],
+    baseline_matched: int,
 ) -> None:
     for finding in findings:
         print(
@@ -153,6 +161,8 @@ def _render_text(
         print(f"Found {len(findings)} issue(s) in {files_checked} file(s).")
     elif not errors:
         print(f"No pyclichecker findings in {files_checked} file(s).")
+    if baseline_matched:
+        print(f"Matched {baseline_matched} existing baseline issue(s).")
 
 
 def _render_json(
@@ -160,6 +170,8 @@ def _render_json(
     *,
     files_checked: int,
     errors: Sequence[str],
+    baseline_path: str | None,
+    baseline_matched: int,
 ) -> None:
     print(
         json.dumps(
@@ -168,6 +180,14 @@ def _render_json(
                 "files_checked": files_checked,
                 "findings": [finding.as_dict() for finding in findings],
                 "errors": list(errors),
+                "baseline": (
+                    {
+                        "path": baseline_path,
+                        "matched": baseline_matched,
+                    }
+                    if baseline_path is not None
+                    else None
+                ),
             },
             indent=2,
             sort_keys=True,
@@ -244,14 +264,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         use_stdin=use_stdin,
         config=config,
     )
+    baseline_path: str | None = None
+    baseline_matched = 0
+    if arguments.baseline:
+        requested_baseline = Path(arguments.baseline).expanduser()
+        fingerprints, baseline_error = load_baseline(requested_baseline)
+        if baseline_error is not None:
+            discovery_errors.append(baseline_error)
+        elif fingerprints is not None:
+            findings, baseline_matched = apply_baseline(findings, fingerprints)
+            baseline_path = str(requested_baseline)
     errors = [*discovery_errors, *read_errors]
 
     if arguments.format == "json":
-        _render_json(findings, files_checked=files_checked, errors=errors)
+        _render_json(
+            findings,
+            files_checked=files_checked,
+            errors=errors,
+            baseline_path=baseline_path,
+            baseline_matched=baseline_matched,
+        )
     elif arguments.format == "github":
         _render_github(findings, errors=errors)
     else:
-        _render_text(findings, files_checked=files_checked, errors=errors)
+        _render_text(
+            findings,
+            files_checked=files_checked,
+            errors=errors,
+            baseline_matched=baseline_matched,
+        )
 
     if errors:
         return EXIT_OPERATIONAL_ERROR

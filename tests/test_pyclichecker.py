@@ -6944,16 +6944,45 @@ class CliTests(unittest.TestCase):
             versions = set(re.findall(r"pyclichecker@(\d+\.\d+\.\d+)", document))
             self.assertEqual(versions, {project_version})
 
+    def test_public_docs_do_not_expose_internal_provenance_tags(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        public_documents = [
+            root / "README.md",
+            root / "CHANGELOG.md",
+            root / "CONTRIBUTING.md",
+            *sorted((root / "docs").rglob("*.md")),
+            *sorted((root / "skills").rglob("*.md")),
+            *sorted((root / "tests/corpus").glob("*.md")),
+        ]
+        provenance_tag = re.compile(
+            r"\[(?:VERIFIED|INHERITED[^\]]*|INFERRED|ASSUMED)\]"
+        )
+        leaks = []
+
+        for path in public_documents:
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(),
+                start=1,
+            ):
+                if provenance_tag.search(line):
+                    leaks.append(f"{path.relative_to(root)}:{line_number}")
+
+        self.assertEqual(leaks, [])
+
     def test_workflow_security_controls(self) -> None:
         root = Path(__file__).resolve().parents[1]
         ci_workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         workflow = (root / ".github/workflows/publish.yml").read_text(encoding="utf-8")
 
-        self.assertEqual(workflow.count("enable-cache: false"), 2)
+        self.assertEqual(workflow.count("enable-cache: false"), 3)
         self.assertNotIn("enable-cache: true", workflow)
         self.assertEqual(ci_workflow.count("persist-credentials: false"), 1)
         self.assertEqual(workflow.count("persist-credentials: false"), 1)
         for content in (ci_workflow, workflow):
+            self.assertIn(
+                "uv run python -m tests.corpus_runner",
+                content,
+            )
             self.assertIn("uv export --quiet --locked --all-groups", content)
             self.assertIn(
                 "pip-audit --strict --requirement .audit-requirements.txt",
@@ -6970,6 +6999,10 @@ class CliTests(unittest.TestCase):
         self.assertIn('wheel = os.environ["WHEEL_PATH"]', ci_workflow)
         self.assertNotIn('uvx --from "$WHEEL_PATH"', ci_workflow)
         self.assertNotIn('uvx --from "${{ steps.wheel.outputs.path }}"', ci_workflow)
+        self.assertIn("verify-index:", workflow)
+        self.assertIn("--no-cache", workflow)
+        self.assertIn("--default-index https://pypi.org/simple", workflow)
+        self.assertIn('--from "pyclichecker==$version"', workflow)
 
     def test_distribution_metadata_is_public_ready(self) -> None:
         package_metadata = metadata("pyclichecker")

@@ -1,0 +1,7 @@
+class Worker:
+    def __init__(self) -> None:
+        self.load()
+        self.ready = True
+
+    def load(self) -> bool:
+        return self.ready

@@ -1,0 +1,7 @@
+class OperatingSystem:
+    def system(self, command: str) -> None:
+        print(command)
+
+
+def refresh(os: OperatingSystem) -> None:
+    os.system("refresh")

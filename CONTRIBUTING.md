@@ -19,6 +19,7 @@ Run the core quality checks before opening a pull request:
 
 ```bash
 uv run python -m unittest discover -v
+uv run python -m tests.corpus_runner
 uv run coverage erase
 uv run coverage run -m unittest discover -v
 uv run coverage report
@@ -63,7 +64,8 @@ posting.
    `v<version>`.
 4. The `publish.yml` workflow verifies the tag, rebuilds and smoke-tests the
    archives, checks PyPI for matching immutable files, then publishes any new
-   files through Trusted Publishing.
+   files through Trusted Publishing and verifies a no-cache installation from
+   the public index.
 
 The publishing job uses GitHub's short-lived OIDC identity. Do not add a PyPI
 API token to repository secrets.

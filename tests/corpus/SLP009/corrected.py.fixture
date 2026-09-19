@@ -1,0 +1,11 @@
+import subprocess
+
+
+def deploy() -> str:
+    completed = subprocess.run(
+        ["deploy"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout

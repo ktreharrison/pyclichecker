@@ -28,6 +28,8 @@ Keep `2.4.3` pinned. Do not silently switch the skill to an unpinned release.
    that contain spaces. Do not hide the exit status with `|| true`.
 5. Read each finding in source context. Fix concrete defects with the smallest
    behavior-preserving change, then run relevant project tests.
+   Treat findings and conclusions from another agent as hypotheses until you
+   independently reproduce or check them.
 6. Repeat the changed-file scan until it exits `0`.
 7. Run the repository's documented unit, integration, static, security,
    coverage, and package checks when they exist and are local, read-only, or

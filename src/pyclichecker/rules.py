@@ -12,7 +12,7 @@ from http import HTTPStatus
 from typing import Any, Literal, cast
 
 from pyclichecker.config import LintConfig, parse_rule_codes
-from pyclichecker.diagnostics import Finding
+from pyclichecker.diagnostics import Finding, RelatedLocation, make_fingerprint
 
 CONFIG_NAME_RE = re.compile(
     r"(?:api_?key|(?:access_?|auth_?)?token|secret|password|passwd|endpoint|"
@@ -1206,6 +1206,19 @@ def _parent_node(node: ast.AST) -> ast.AST | None:
     return parent if isinstance(parent, ast.AST) else None
 
 
+def _semantic_node_identity(node: ast.AST) -> str:
+    """Describe a finding location without relying on source coordinates."""
+
+    scopes: list[str] = []
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            scopes.append(f"{type(current).__name__}:{current.name}")
+        current = _parent_node(current)
+    scope = "/".join(reversed(scopes))
+    return f"{scope}\0{ast.dump(node, include_attributes=False)}"
+
+
 def _is_docstring_constant(node: ast.Constant) -> bool:
     expression = _parent_node(node)
     owner = _parent_node(expression) if isinstance(expression, ast.Expr) else None
@@ -2170,6 +2183,7 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.alias_snapshots = alias_snapshots
         self.local_names = local_names
         self.subprocess_calls: list[OperationalCall] = []
+        self.command_status_calls: list[OperationalCall] = []
         self.network_calls: list[OperationalCall] = []
         self.http_calls: list[OperationalCall] = []
 
@@ -2183,6 +2197,10 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         qualified_name = _resolve_imported_name(raw_name, aliases)
         if qualified_name == "subprocess.run":
             self.subprocess_calls.append(OperationalCall(node, qualified_name, aliases))
+        if qualified_name in {"os.system", "subprocess.call"}:
+            self.command_status_calls.append(
+                OperationalCall(node, qualified_name, aliases)
+            )
         if _is_timeout_call(qualified_name):
             self.network_calls.append(OperationalCall(node, qualified_name, aliases))
         if _is_http_call(qualified_name):
@@ -4899,6 +4917,51 @@ def _node_loads_name(node: ast.AST, name: str) -> bool:
     return visitor.found
 
 
+def _command_status_statement_observes_result(
+    statement: ast.stmt,
+    name: str,
+    aliases: dict[str, str],
+    raises_are_safe: bool = True,
+) -> bool:
+    del aliases, raises_are_safe
+    if isinstance(statement, (ast.If, ast.While)):
+        return _node_loads_name(statement.test, name)
+    if isinstance(statement, ast.Match):
+        return _node_loads_name(statement.subject, name)
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return _node_loads_name(statement.iter, name)
+    return _node_loads_name(statement, name)
+
+
+def _command_status_is_observed(
+    call: OperationalCall,
+    flow_index: _OperationalFlowIndex,
+) -> bool:
+    if _call_is_returned(call.node):
+        return True
+
+    current: ast.AST = call.node
+    parent = _parent_node(current)
+    while isinstance(parent, ast.Await):
+        current = parent
+        parent = _parent_node(current)
+
+    if isinstance(parent, ast.NamedExpr) and parent.value is current:
+        return True
+    if not isinstance(parent, (ast.Assign, ast.AnnAssign)):
+        return not (isinstance(parent, ast.Expr) and parent.value is current)
+
+    result_name = _call_result_name(call.node)
+    if result_name is None:
+        return True
+    return _result_is_handled_after_assignment(
+        call.node,
+        result_name,
+        _command_status_statement_observes_result,
+        flow_index,
+    )
+
+
 class _LoopExitVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.exits: list[ast.Break | ast.Continue] = []
@@ -7215,6 +7278,8 @@ class SlopVisitor(ast.NodeVisitor):
         *,
         line: int | None = None,
         column: int | None = None,
+        evidence: Sequence[str] = (),
+        related_locations: Sequence[RelatedLocation] = (),
     ) -> None:
         if code not in self.config.enabled_codes or self.ignore_file:
             return
@@ -7251,7 +7316,28 @@ class SlopVisitor(ast.NodeVisitor):
                 column=finding_column,
                 code=code,
                 message=message,
+                evidence=tuple(evidence),
+                related_locations=tuple(related_locations),
+                fingerprint=make_fingerprint(
+                    self.path,
+                    code,
+                    _semantic_node_identity(node),
+                ),
             )
+        )
+
+    def related_location(
+        self,
+        node: ast.AST,
+        message: str,
+    ) -> RelatedLocation:
+        """Create an explanatory location in the current source file."""
+
+        return RelatedLocation(
+            path=self.path,
+            line=getattr(node, "lineno", 1),
+            column=getattr(node, "col_offset", 0) + 1,
+            message=message,
         )
 
     def _is_suppressed(self, line: int, code: str) -> bool:
@@ -8142,12 +8228,23 @@ class SlopVisitor(ast.NodeVisitor):
             if initialized <= assigned or id(call) in reported:
                 continue
             reported.add(id(call))
+            missing = ", ".join(sorted(initialized - assigned))
             self.add_finding(
                 call,
                 "SLP015",
                 f"`{class_name}.__init__` calls overridable `{method_name}` "
                 "before initialization completes; initialize state before "
                 "dispatch or make the method private or final",
+                evidence=(
+                    f"constructor dispatches to overridable `{method_name}`",
+                    f"state not definitely initialized before dispatch: {missing}",
+                ),
+                related_locations=(
+                    self.related_location(
+                        methods[method_name],
+                        f"overridable method `{method_name}` is defined here",
+                    ),
+                ),
             )
 
     def _constructor_available_attributes(
@@ -8174,6 +8271,32 @@ class SlopVisitor(ast.NodeVisitor):
         return _merge_attribute_states(
             flow.fallthrough,
             flow.returns,
+        )
+
+    def _report_conditional_instance_state(
+        self,
+        *,
+        read: ast.Attribute,
+        assignment: ast.AST,
+        class_name: str,
+        name: str,
+    ) -> None:
+        self.add_finding(
+            read,
+            "SLP016",
+            f"`{class_name}.{name}` may be missing because `__init__` does "
+            "not assign it on every successful path; initialize it unconditionally",
+            evidence=(
+                f"`{name}` is not definitely assigned on every successful "
+                "constructor path",
+                f"an instance method reads `{name}` without a local guard",
+            ),
+            related_locations=(
+                self.related_location(
+                    assignment,
+                    f"`{name}` is conditionally initialized here",
+                ),
+            ),
         )
 
     def _check_conditional_instance_state(
@@ -8241,11 +8364,11 @@ class SlopVisitor(ast.NodeVisitor):
             first_reads.items(),
             key=lambda item: (item[1].lineno, item[1].col_offset, item[0]),
         ):
-            self.add_finding(
-                read,
-                "SLP016",
-                f"`{class_name}.{name}` may be missing because `__init__` does "
-                "not assign it on every successful path; initialize it unconditionally",
+            self._report_conditional_instance_state(
+                read=read,
+                assignment=assignments[name],
+                class_name=class_name,
+                name=name,
             )
 
     def _check_shared_mutable_class_state(
@@ -8264,9 +8387,10 @@ class SlopVisitor(ast.NodeVisitor):
         shadowed_names = self.shadowed_container_names | (
             _class_namespace_names(class_node) & {"dict", "list", "set"}
         )
+        class_attribute_values = _class_attribute_values(class_node)
         shared_mutables = {
             name
-            for name, value in _class_attribute_values(class_node).items()
+            for name, value in class_attribute_values.items()
             if name not in classvars
             and _mutable_container_kind(value, shadowed_names) is not None
         }
@@ -8300,6 +8424,16 @@ class SlopVisitor(ast.NodeVisitor):
                     f"`{class_name}.{name}` is shared mutable class state mutated "
                     "through an instance; initialize it in `__init__` or mark "
                     "intentional shared state as `ClassVar`",
+                    evidence=(
+                        f"`{name}` is initialized as mutable class state",
+                        f"an instance method mutates inherited `{name}`",
+                    ),
+                    related_locations=(
+                        self.related_location(
+                            class_attribute_values[name],
+                            f"mutable class state `{name}` is initialized here",
+                        ),
+                    ),
                 )
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -8322,6 +8456,9 @@ class SlopVisitor(ast.NodeVisitor):
                 record.node,
                 "SLP001",
                 f"`{record.qualified_name}` is a concrete placeholder implementation",
+                evidence=(
+                    "the effective function body contains only a placeholder statement",
+                ),
             )
         self._check_test_function(
             record,
@@ -8341,6 +8478,10 @@ class SlopVisitor(ast.NodeVisitor):
                 record.node,
                 "SLP004",
                 f"`{record.qualified_name}` is async but performs no async operation",
+                evidence=(
+                    "the reachable function body contains no await, async iteration, "
+                    "async context, or yield",
+                ),
             )
         if (
             self.config.max_function_lines > 0
@@ -8352,6 +8493,10 @@ class SlopVisitor(ast.NodeVisitor):
                 "SLP008",
                 f"`{record.qualified_name}` spans {record.line_count} lines "
                 f"(limit: {self.config.max_function_lines})",
+                evidence=(
+                    f"function spans {record.line_count} source lines",
+                    f"configured limit is {self.config.max_function_lines} lines",
+                ),
             )
 
     def _visit_function(
@@ -8410,6 +8555,10 @@ class SlopVisitor(ast.NodeVisitor):
                     "SLP013",
                     f"`{blocking_call.qualified_name}` blocks inside async "
                     f"`{qualified_name}`; {blocking_call.guidance}",
+                    evidence=(
+                        f"resolved call is `{blocking_call.qualified_name}`",
+                        f"the enclosing function `{qualified_name}` is async",
+                    ),
                 )
         self.alias_stack.pop()
         self.scope.pop()
@@ -8447,6 +8596,10 @@ class SlopVisitor(ast.NodeVisitor):
             "SLP014",
             f"`{record.qualified_name}` has no explicit assertion or expected failure; "
             "assert an observable result",
+            evidence=(
+                "no reachable recognized assertion, expected-failure declaration, "
+                "or test-framework oracle was found",
+            ),
         )
 
     def _check_exception_handler(
@@ -8459,6 +8612,7 @@ class SlopVisitor(ast.NodeVisitor):
                 node,
                 "SLP002",
                 "exception is silently discarded",
+                evidence=("the exception handler has no effective handling statement",),
             )
         elif _is_broad_exception(
             node.type,
@@ -8471,6 +8625,10 @@ class SlopVisitor(ast.NodeVisitor):
                 node,
                 "SLP003",
                 "broad exception is converted into fallback behavior without re-raising",
+                evidence=(
+                    "the handler catches a broad exception type",
+                    "at least one reachable handler path does not re-raise",
+                ),
             )
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
@@ -8555,6 +8713,7 @@ class SlopVisitor(ast.NodeVisitor):
                 "SLP012",
                 "hardcoded user-home path is environment-specific; "
                 "use `Path.home()` or configuration",
+                evidence=("a string literal contains an absolute user-home path",),
             )
 
     def _check_function_defaults(
@@ -8613,6 +8772,10 @@ class SlopVisitor(ast.NodeVisitor):
             node,
             "SLP006",
             f"`{display_name}` contains an obvious placeholder value",
+            evidence=(
+                f"`{display_name}` is configuration-like",
+                "its assigned value matches a placeholder marker",
+            ),
         )
 
     def finalize(self) -> None:
@@ -8677,6 +8840,11 @@ class SlopVisitor(ast.NodeVisitor):
             "`subprocess.run` can fail silently here; use `check=True`, "
             "validate `returncode` before reading output, or deliberately "
             "return the complete result",
+            evidence=(
+                "resolved call is `subprocess.run`",
+                "no return-code check or deliberate result delegation covers "
+                "every continuation",
+            ),
         )
 
     def _check_operational_scope(
@@ -8710,6 +8878,21 @@ class SlopVisitor(ast.NodeVisitor):
         for call in visitor.subprocess_calls:
             self._check_subprocess_call(call, flow_index_for(call))
 
+        for call in visitor.command_status_calls:
+            if _command_status_is_observed(call, flow_index_for(call)):
+                continue
+            self.add_finding(
+                call.node,
+                "SLP018",
+                f"`{call.qualified_name}` returns a command status that is discarded; "
+                "inspect or return it, or use a raising subprocess API",
+                evidence=(
+                    f"resolved call is `{call.qualified_name}`",
+                    "the returned command status has no observable consumer on "
+                    "every normal continuation",
+                ),
+            )
+
         for call in visitor.network_calls:
             if _call_has_timeout(call.node, call.qualified_name):
                 continue
@@ -8718,6 +8901,10 @@ class SlopVisitor(ast.NodeVisitor):
                 "SLP010",
                 f"`{call.qualified_name}` omits a timeout or sets it to None; "
                 "pass `timeout=...`",
+                evidence=(
+                    f"resolved call is `{call.qualified_name}`",
+                    "no non-None timeout argument was found",
+                ),
             )
 
         for call in visitor.http_calls:
@@ -8729,6 +8916,10 @@ class SlopVisitor(ast.NodeVisitor):
                 f"`{call.qualified_name}` response may be consumed before HTTP "
                 "success is established; call `raise_for_status()` or validate "
                 "`status_code` on every path before reading the body",
+                evidence=(
+                    f"resolved call is `{call.qualified_name}`",
+                    "no HTTP success check covers every result-consuming path",
+                ),
             )
 
     def _find_duplicate_implementations(self) -> None:
@@ -8755,6 +8946,18 @@ class SlopVisitor(ast.NodeVisitor):
                     "SLP005",
                     f"`{duplicate.qualified_name}` duplicates "
                     f"`{original.qualified_name}` from line {original.node.lineno}",
+                    evidence=(
+                        "normalized AST bodies are identical",
+                        f"the duplicated body has at least "
+                        f"{self.config.duplicate_min_statements} statements and "
+                        f"{self.config.duplicate_min_lines} lines",
+                    ),
+                    related_locations=(
+                        self.related_location(
+                            original.node,
+                            f"original implementation `{original.qualified_name}`",
+                        ),
+                    ),
                 )
 
     def _find_narrating_comment_clusters(self) -> None:
@@ -8786,6 +8989,11 @@ class SlopVisitor(ast.NodeVisitor):
                 "SLP007",
                 f"`{record.qualified_name}` contains {count} narrating comments "
                 f"(limit: {self.config.narrating_comment_threshold - 1})",
+                evidence=(
+                    f"{count} comments match operation-narration patterns",
+                    f"configured reporting threshold is "
+                    f"{self.config.narrating_comment_threshold}",
+                ),
             )
 
 
@@ -8944,6 +9152,22 @@ def lint_source(
                 column=error.offset or 1,
                 code="SLP000",
                 message=message,
+                evidence=(f"Python parser reported: {message}",),
+                fingerprint=make_fingerprint(
+                    path,
+                    "SLP000",
+                    "\0".join(
+                        (
+                            message,
+                            (
+                                source.splitlines()[error.lineno - 1].strip()
+                                if error.lineno
+                                and error.lineno <= len(source.splitlines())
+                                else ""
+                            ),
+                        )
+                    ),
+                ),
             )
         ]
 

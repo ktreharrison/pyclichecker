@@ -1,0 +1,7 @@
+import os
+
+
+def refresh() -> None:
+    status = os.system("refresh")
+    if status:
+        raise RuntimeError("refresh failed")

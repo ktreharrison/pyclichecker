@@ -54,6 +54,15 @@ Every changed rule MUST have:
 - A corrected example that does not report it.
 - False-positive coverage for aliases, shadowing, delegation, test fixtures, or suppressions when relevant.
 
+### Differential corpus
+
+```bash
+uv run python -m tests.corpus_runner
+```
+
+This gate MUST match the checked-in expectations for pyclichecker, Ruff,
+Pyright, and ty.
+
 ### Static checks
 
 ```bash

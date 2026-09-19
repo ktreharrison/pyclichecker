@@ -8,7 +8,7 @@ from pyclichecker.cli import (
     main,
 )
 from pyclichecker.config import LintConfig
-from pyclichecker.diagnostics import RULES, Finding, Rule
+from pyclichecker.diagnostics import RULES, Finding, RelatedLocation, Rule
 from pyclichecker.discovery import discover_python_files, lint_files
 from pyclichecker.rules import lint_source
 
@@ -20,6 +20,7 @@ __all__ = [
     "EXIT_OPERATIONAL_ERROR",
     "Finding",
     "LintConfig",
+    "RelatedLocation",
     "Rule",
     "__version__",
     "discover_python_files",

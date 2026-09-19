@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Added evidence-rich JSON findings with confidence, related locations, and
+  line-independent content fingerprints.
+- Added `--baseline` support so established repositories can report and fail
+  only on findings absent from a prior JSON result.
+- Added `SLP018` for discarded return statuses from `os.system` and
+  `subprocess.call`.
+- Added an executable differential corpus for Ruff, Pyright, ty, and
+  pyclichecker, plus explicit source-encoding regression coverage.
+- Documented pyclichecker's place beside formatters, general linters, type
+  checkers, tests, and the internal flow-analysis model.
+- Added a post-publish, no-cache public PyPI installation verification.
+
 ## 2.4.3 - 2026-09-19
 
 - Tightened suppression parsing so prose cannot masquerade as a directive,

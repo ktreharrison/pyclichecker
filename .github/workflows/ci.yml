@@ -43,6 +43,9 @@ jobs:
           uv run coverage run -m unittest discover -v
           uv run coverage report
 
+      - name: Run differential corpus
+        run: uv run python -m tests.corpus_runner
+
       - name: Run Ruff
         run: |
           uv run ruff check .

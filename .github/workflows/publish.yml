@@ -46,6 +46,7 @@ jobs:
           uv run coverage erase
           uv run coverage run -m unittest discover -v
           uv run coverage report
+          uv run python -m tests.corpus_runner
           uv run ruff check .
           uv run ruff format --check .
           uv run mypy
@@ -116,3 +117,51 @@ jobs:
           uv publish
           --trusted-publishing always
           --check-url https://pypi.org/simple
+
+  verify-index:
+    name: Verify public installation
+    if: github.event.release.prerelease == false
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Verify no-cache installation from PyPI
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          expected="pyclichecker $version"
+          for attempt in 1 2 3 4 5; do
+            if output="$(
+              uvx \
+                --no-cache \
+                --python 3.14 \
+                --default-index https://pypi.org/simple \
+                --from "pyclichecker==$version" \
+                pyclichecker --version 2>&1
+            )"; then
+              printf '%s\n' "$output"
+              if printf '%s\n' "$output" | grep -Fx "$expected"; then
+                uvx \
+                  --no-cache \
+                  --python 3.14 \
+                  --default-index https://pypi.org/simple \
+                  --from "pyclichecker==$version" \
+                  pyclichecker --list-rules
+                exit 0
+              fi
+            else
+              printf '%s\n' "$output"
+            fi
+            sleep 10
+          done
+          echo "PyPI did not serve $expected after 5 attempts" >&2
+          exit 1

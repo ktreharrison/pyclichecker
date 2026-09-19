@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "ruff_select": [
+    "B",
+    "BLE",
+    "C90",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "PERF",
+    "S",
+    "UP"
+  ],
+  "cases": [
+    {
+      "id": "pyclichecker-overridable-init",
+      "kind": "true-positive",
+      "rule": "SLP015",
+      "variant": "positive",
+      "source": "SLP015/positive.py.fixture",
+      "expected": {
+        "pyclichecker": ["SLP015"],
+        "ruff": [],
+        "pyright": [],
+        "ty": []
+      }
+    },
+    {
+      "id": "type-checker-return-type",
+      "kind": "true-positive",
+      "source": "comparison/type_error.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": [],
+        "pyright": ["reportReturnType"],
+        "ty": ["invalid-return-type"]
+      }
+    },
+    {
+      "id": "ruff-none-comparison",
+      "kind": "true-positive",
+      "source": "comparison/ruff_none_comparison.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": ["E711"],
+        "pyright": [],
+        "ty": []
+      }
+    },
+    {
+      "id": "overlap-broad-exception",
+      "kind": "overlap",
+      "rule": "SLP003",
+      "variant": "positive",
+      "source": "SLP003/positive.py.fixture",
+      "expected": {
+        "pyclichecker": ["SLP003"],
+        "ruff": ["BLE001"],
+        "pyright": [],
+        "ty": []
+      }
+    },
+    {
+      "id": "checked-subprocess-guard",
+      "kind": "false-positive-guard",
+      "rule": "SLP009",
+      "variant": "corrected",
+      "source": "SLP009/corrected.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": ["S607"],
+        "pyright": [],
+        "ty": []
+      }
+    },
+    {
+      "id": "ignored-command-status",
+      "kind": "overlap",
+      "rule": "SLP018",
+      "variant": "positive",
+      "source": "SLP018/positive.py.fixture",
+      "expected": {
+        "pyclichecker": ["SLP018"],
+        "ruff": ["S605", "S607"],
+        "pyright": [],
+        "ty": ["deprecated"]
+      }
+    },
+    {
+      "id": "ignored-command-status-corrected",
+      "kind": "false-positive-guard",
+      "rule": "SLP018",
+      "variant": "corrected",
+      "source": "SLP018/corrected.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": ["S605", "S607"],
+        "pyright": [],
+        "ty": ["deprecated"]
+      }
+    },
+    {
+      "id": "ignored-command-status-shadowed",
+      "kind": "false-positive-guard",
+      "rule": "SLP018",
+      "variant": "false_positive",
+      "source": "SLP018/false_positive.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": [],
+        "pyright": [],
+        "ty": []
+      }
+    }
+  ]
+}

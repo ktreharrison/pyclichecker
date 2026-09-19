@@ -1,0 +1,5 @@
+def lookup(values: dict[str, int], key: str) -> int | None:
+    try:
+        return values[key]
+    except Exception:
+        return None
