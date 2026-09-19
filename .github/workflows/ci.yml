@@ -77,8 +77,19 @@ jobs:
               print(f"path={wheels[0].as_posix()}", file=output)
 
       - name: Smoke-test built wheel
+        shell: python
         env:
           WHEEL_PATH: ${{ steps.wheel.outputs.path }}
         run: |
-          uvx --from "$WHEEL_PATH" pyclichecker --version
-          uvx --from "$WHEEL_PATH" pyclichecker src tests
+          import os
+          import subprocess
+
+          wheel = os.environ["WHEEL_PATH"]
+          subprocess.run(
+              ["uvx", "--from", wheel, "pyclichecker", "--version"],
+              check=True,
+          )
+          subprocess.run(
+              ["uvx", "--from", wheel, "pyclichecker", "src", "tests"],
+              check=True,
+          )

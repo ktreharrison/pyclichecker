@@ -6963,6 +6963,12 @@ class CliTests(unittest.TestCase):
             "WHEEL_PATH: ${{ steps.wheel.outputs.path }}",
             ci_workflow,
         )
+        self.assertIn(
+            "- name: Smoke-test built wheel\n        shell: python",
+            ci_workflow,
+        )
+        self.assertIn('wheel = os.environ["WHEEL_PATH"]', ci_workflow)
+        self.assertNotIn('uvx --from "$WHEEL_PATH"', ci_workflow)
         self.assertNotIn('uvx --from "${{ steps.wheel.outputs.path }}"', ci_workflow)
 
     def test_distribution_metadata_is_public_ready(self) -> None:
