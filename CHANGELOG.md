@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.4.3 - 2026-09-19
+
+- Tightened suppression parsing so prose cannot masquerade as a directive,
+  while preserving code-specific suppressions with trailing reasons, adjacent
+  type-ignore directives, and multiline-call closing lines.
+- Improved alias and shadowing handling for protocols, abstract methods,
+  overloads, and test oracles, including contract imports inside module and
+  class control flow and stricter recognition of attribute-style assertions.
+- Made broad-exception, subprocess, HTTP-response, constructor-loop, and
+  standard-input analysis follow the relevant control flow more accurately.
+- Corrected nested re-raise classification, exceptional result abandonment,
+  guaranteed loop checks, status-constant aliases, derived HTTP predicates, and
+  inverted predicate polarity in subprocess and HTTP flow analysis.
+- Indexed operational-result uses so stricter subprocess and HTTP validation
+  remains fast on functions with many calls.
+- Added strict mypy, branch coverage, Ruff
+  security/datetime/complexity/performance rules, Bandit, and pip-audit to the
+  locked development and CI gates.
+- Documented review coverage, agentic handoff expectations, and the explicit
+  limit that pyclichecker does not infer formal time complexity.
+
 ## 2.4.2 - 2026-08-21
 
 - Added Ubuntu, macOS, and Windows CI coverage for tests, static checks,

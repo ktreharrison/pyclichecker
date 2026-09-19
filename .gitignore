@@ -3,6 +3,7 @@ __pycache__/
 *.py[oc]
 .DS_Store
 .coverage
+.audit-requirements.txt
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

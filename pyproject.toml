@@ -1,7 +1,7 @@
 [project]
 name = "pyclichecker"
-version = "2.4.2"
-description = "A high-signal Python linter for defects common in rushed and AI-generated code"
+version = "2.4.3"
+description = "A high-signal Python linter for behavioral defects and maintainability risks"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -39,6 +39,7 @@ source-include = [
     "AGENTS.md",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
+    "docs/**",
     "LICENSE",
     "skills/**",
     "tests/**",
@@ -47,11 +48,33 @@ source-include = [
 
 [dependency-groups]
 dev = [
+    "bandit[toml]>=1.9.4",
+    "coverage[toml]>=7.16.1",
+    "mypy>=2.3.1",
+    "pip-audit>=2.10.1",
     "ruff>=0.16.3",
 ]
 
 [tool.ruff]
 line-length = 88
+target-version = "py314"
 
 [tool.ruff.lint]
-select = ["B", "E4", "E7", "E9", "F", "I", "UP"]
+select = ["B", "C90", "DTZ", "E4", "E7", "E9", "F", "I", "PERF", "S", "UP"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 14
+
+[tool.mypy]
+files = ["src/pyclichecker"]
+python_version = "3.14"
+strict = true
+
+[tool.coverage.run]
+branch = true
+source = ["pyclichecker"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true

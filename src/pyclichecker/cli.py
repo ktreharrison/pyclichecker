@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="pyclichecker",
-        description="Read-only linter for high-signal AI-generated Python code smells.",
+        description="Read-only linter for high-signal Python quality defects.",
         epilog=(
             "Examples:\n"
             "  pyclichecker .\n"
@@ -152,7 +152,7 @@ def _render_text(
     if findings:
         print(f"Found {len(findings)} issue(s) in {files_checked} file(s).")
     elif not errors:
-        print(f"No AI-slop findings in {files_checked} file(s).")
+        print(f"No pyclichecker findings in {files_checked} file(s).")
 
 
 def _render_json(

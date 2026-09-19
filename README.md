@@ -4,6 +4,8 @@
 [![PyPI](https://img.shields.io/pypi/v/pyclichecker.svg)](https://pypi.org/project/pyclichecker/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+**High-signal behavioral linting for Python.**
+
 `pyclichecker` is a read-only Python linter for high-signal defects and
 maintainability smells that often appear in rushed or generated code. It parses
 source with Python's AST and token APIs and has no runtime dependencies.
@@ -39,7 +41,7 @@ pyclichecker . --format github
 Pin a release when reproducibility matters:
 
 ```bash
-uvx pyclichecker@2.4.2 .
+uvx pyclichecker@2.4.3 .
 ```
 
 ## Reading a result
@@ -74,12 +76,12 @@ A practical review loop is:
 | `SLP006` | error | Obvious placeholder in configuration | Require a real configured value instead of shipping a dummy fallback. |
 | `SLP007` | warning | Cluster of narrating comments | Remove narration or replace it with the reason behind non-obvious code. |
 | `SLP008` | warning | Oversized function | Split distinct responsibilities and test them independently. |
-| `SLP009` | warning | Unchecked `subprocess.run` result | Use `check=True`, inspect `returncode`, or deliberately return the result. |
+| `SLP009` | warning | Unchecked `subprocess.run` result | Use `check=True`, validate `returncode` before reading output, or deliberately return the complete result. |
 | `SLP010` | warning | Synchronous network call omits a timeout or sets it to `None` | Pass an explicit timeout appropriate for the operation. |
-| `SLP011` | warning | HTTP response consumed without a success check | Call `raise_for_status()` or validate the status before using the body. |
+| `SLP011` | warning | HTTP response consumed without a success check | Call `raise_for_status()` or validate the status on every path before using the body. |
 | `SLP012` | warning | Path tied to one user's home directory | Use `Path.home()`, a project-relative path, or configuration. |
 | `SLP013` | warning | Known blocking API called inside async code | Use an async API or move the blocking call to a worker thread. |
-| `SLP014` | warning | Test has no explicit result or failure oracle | Assert an observable result or declare the expected exception or failure. |
+| `SLP014` | warning | Test has no explicit result or failure oracle | Use an assertion, a recognized test-framework oracle, or an expected-failure declaration. Arbitrary `assert_*` helper names are not trusted automatically. |
 | `SLP015` | warning | Overridable method called before constructor state is initialized | Initialize state before dispatch, or make the hook private or final. |
 | `SLP016` | warning | Instance state initialized on only some constructor paths | Initialize the attribute unconditionally before other methods can read it. |
 | `SLP017` | warning | Shared mutable class state changed through an instance in production code | Initialize it per instance or mark intentional shared state as `ClassVar`. |
@@ -99,6 +101,19 @@ For a first pass, fix `error` findings before reviewing `warning` findings.
 Warnings are prompts for engineering judgment, not proof that the code is
 wrong.
 
+## Review coverage and performance
+
+`pyclichecker` complements, rather than replaces, general-purpose quality
+tools. This repository also gates changes with Ruff, strict mypy, Bandit,
+pip-audit, unit tests, and branch coverage. See
+[Review coverage and limits](https://github.com/ktreharrison/pyclichecker/blob/main/docs/review-coverage.md)
+for the mapping to the Real Python review and agentic-engineering workflows.
+
+Performance coverage is deliberately narrow. `SLP013` catches selected
+blocking calls in async code, and Ruff's `PERF` rules catch known local
+performance anti-patterns. `pyclichecker` does not infer Big-O complexity,
+detect general N+1 behavior, or replace benchmarks and profiling.
+
 ## Suppressions
 
 Inline suppression requires an explicit pyclichecker rule code:
@@ -113,7 +128,9 @@ def another_stub():  # slop: ignore [SLP001]
 ```
 
 Bare `# noqa` and unrelated codes such as `# noqa: F401` do not suppress
-pyclichecker. Directive-like text inside a string is also ignored.
+pyclichecker. A code-specific directive may include a trailing reason and may
+follow a `# type: ignore[...]` directive on the same line. Directive-like prose
+and text inside a string are ignored.
 
 To suppress an entire file, place this real comment within its first five
 lines:
@@ -142,7 +159,7 @@ installing the package.
 Agents should use the pinned release and JSON output for stable results:
 
 ```bash
-uvx pyclichecker@2.4.2 changed_file.py --format json
+uvx pyclichecker@2.4.3 changed_file.py --format json
 ```
 
 JSON output contains the package version, number of files checked, findings,
@@ -166,7 +183,7 @@ project's `AGENTS.md`:
 After creating or changing Python code:
 
 1. Run pyclichecker on every changed Python file:
-   `uvx pyclichecker@2.4.2 changed_file.py --format json`
+   `uvx pyclichecker@2.4.3 changed_file.py --format json`
 2. Treat exit 1 as findings to fix and exit 2 as an incomplete scan.
 3. Fix findings and rerun relevant tests. Do not add broad suppressions.
 4. Run the final repository gate with the same command, replacing
@@ -176,13 +193,21 @@ After creating or changing Python code:
 ## Development
 
 The locked development environment contains Ruff and uses the standard-library
-`unittest` runner:
+`unittest` runner. It also includes strict typing, branch coverage, security,
+and dependency-audit gates:
 
 ```bash
 uv sync --locked
 uv run python -m unittest discover -v
+uv run coverage erase
+uv run coverage run -m unittest discover -v
+uv run coverage report
 uv run ruff check .
 uv run ruff format --check .
+uv run mypy
+uv run bandit -q -r src
+uv export --quiet --locked --all-groups --no-emit-project --format requirements.txt --output-file .audit-requirements.txt
+uv run pip-audit --strict --requirement .audit-requirements.txt
 uv run pyclichecker src tests
 uv build
 uvx --from . pyclichecker --version

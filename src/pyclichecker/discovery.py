@@ -83,6 +83,7 @@ def discover_python_files(
         if not path.exists():
             errors.append(f"path does not exist: {raw_input}")
             continue
+        candidates: Iterable[Path]
         if path.is_file():
             if path.suffix != ".py":
                 errors.append(f"not a Python file: {raw_input}")
@@ -126,8 +127,13 @@ def lint_files(
     files_checked = 0
 
     if use_stdin:
-        findings.extend(lint_source(sys.stdin.read(), path="<stdin>", config=config))
-        files_checked += 1
+        try:
+            source = sys.stdin.read()
+        except (OSError, UnicodeError, ValueError) as error:
+            errors.append(f"<stdin>: {error}")
+        else:
+            findings.extend(lint_source(source, path="<stdin>", config=config))
+            files_checked += 1
 
     for path in files:
         display_path = _display_path(path)

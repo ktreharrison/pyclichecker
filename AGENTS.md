@@ -59,6 +59,18 @@ Every changed rule MUST have:
 ```bash
 uv run ruff check .
 uv run ruff format --check .
+uv run mypy
+```
+
+### Coverage and security
+
+```bash
+uv run coverage erase
+uv run coverage run -m unittest discover -v
+uv run coverage report
+uv run bandit -q -r src
+uv export --quiet --locked --all-groups --no-emit-project --format requirements.txt --output-file .audit-requirements.txt
+uv run pip-audit --strict --requirement .audit-requirements.txt
 ```
 
 ### Self-lint

@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -35,13 +37,25 @@ jobs:
       - name: Install locked development environment
         run: uv sync --locked
 
-      - name: Run unit tests
-        run: uv run python -m unittest discover -v
+      - name: Run unit tests with branch coverage
+        run: |
+          uv run coverage erase
+          uv run coverage run -m unittest discover -v
+          uv run coverage report
 
       - name: Run Ruff
         run: |
           uv run ruff check .
           uv run ruff format --check .
+
+      - name: Run strict type checking
+        run: uv run mypy
+
+      - name: Run security checks
+        run: |
+          uv run bandit -q -r src
+          uv export --quiet --locked --all-groups --no-emit-project --format requirements.txt --output-file .audit-requirements.txt
+          uv run pip-audit --strict --requirement .audit-requirements.txt
 
       - name: Run pyclichecker on itself
         run: uv run pyclichecker src tests
@@ -63,6 +77,8 @@ jobs:
               print(f"path={wheels[0].as_posix()}", file=output)
 
       - name: Smoke-test built wheel
+        env:
+          WHEEL_PATH: ${{ steps.wheel.outputs.path }}
         run: |
-          uvx --from "${{ steps.wheel.outputs.path }}" pyclichecker --version
-          uvx --from "${{ steps.wheel.outputs.path }}" pyclichecker src tests
+          uvx --from "$WHEEL_PATH" pyclichecker --version
+          uvx --from "$WHEEL_PATH" pyclichecker src tests
