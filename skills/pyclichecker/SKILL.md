@@ -8,10 +8,10 @@ description: Run pyclichecker as a strict Python quality gate after creating, ed
 Use the pinned release for reproducible results:
 
 ```bash
-uvx pyclichecker@2.4.3 changed_file.py --format json
+uvx pyclichecker@2.5.0 changed_file.py --format json
 ```
 
-Keep `2.4.3` pinned. Do not silently switch the skill to an unpinned release.
+Keep `2.5.0` pinned. Do not silently switch the skill to an unpinned release.
 
 ## Workflow
 
@@ -35,7 +35,7 @@ Keep `2.4.3` pinned. Do not silently switch the skill to an unpinned release.
    coverage, and package checks when they exist and are local, read-only, or
    already authorized. Obtain explicit user approval before any credentialed,
    external, or state-changing check. Invoking this skill authorizes the pinned,
-   read-only `uvx pyclichecker@2.4.3` scans in steps 4 and 8, including resolving
+   read-only `uvx pyclichecker@2.5.0` scans in steps 4 and 8, including resolving
    that public package through uv's normal cache or package-index access. If the
    environment itself requires approval for network access, request it or use an
    already-cached copy; do not silently substitute another version. Otherwise
@@ -46,7 +46,7 @@ Keep `2.4.3` pinned. Do not silently switch the skill to an unpinned release.
 8. From the repository root, run the final gate:
 
    ```bash
-   uvx pyclichecker@2.4.3 . --format json
+   uvx pyclichecker@2.5.0 . --format json
    ```
 
 9. When version-control metadata is available, run `git status --short`,

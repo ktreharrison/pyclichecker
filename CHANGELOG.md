@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 2.5.0 - 2026-10-11
 
+- Expanded Python runtime and syntax compatibility to Python >=3.12, including
+  Python 3.12 and 3.13 classifiers and configuration.
 - Added evidence-rich JSON findings with confidence, related locations, and
   line-independent content fingerprints.
 - Added `--baseline` support so established repositories can report and fail

@@ -59,7 +59,7 @@ pyclichecker . --format github
 Pin a release when reproducibility matters:
 
 ```bash
-uvx pyclichecker@2.4.3 .
+uvx pyclichecker@2.5.0 .
 ```
 
 ## Reading a result
@@ -221,7 +221,7 @@ installing the package.
 Agents should use the pinned release and JSON output for stable results:
 
 ```bash
-uvx pyclichecker@2.4.3 changed_file.py --format json
+uvx pyclichecker@2.5.0 changed_file.py --format json
 ```
 
 JSON output contains the package version, number of files checked, findings,
@@ -249,7 +249,7 @@ project's `AGENTS.md`:
 After creating or changing Python code:
 
 1. Run pyclichecker on every changed Python file:
-   `uvx pyclichecker@2.4.3 changed_file.py --format json`
+   `uvx pyclichecker@2.5.0 changed_file.py --format json`
 2. Treat exit 1 as findings to fix and exit 2 as an incomplete scan.
 3. Fix findings and rerun relevant tests. Do not add broad suppressions.
 4. Run the final repository gate with the same command, replacing
