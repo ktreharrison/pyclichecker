@@ -99,6 +99,48 @@ class FeatureRuleTests(unittest.TestCase):
 
         self.assertNotIn("SLP018", [item.code for item in findings])
 
+    def test_insecure_temp_file_detects_mktemp(self) -> None:
+        findings = self.lint("""
+            import tempfile
+            from tempfile import mktemp
+
+            path1 = tempfile.mktemp(suffix=".txt")
+            path2 = mktemp()
+        """)
+
+        temp_findings = [item for item in findings if item.code == "SLP019"]
+        self.assertEqual(len(temp_findings), 2)
+        self.assertEqual([item.line for item in temp_findings], [5, 6])
+        self.assertIn("insecure temporary file name", temp_findings[0].message)
+
+    def test_insecure_temp_file_supports_inline_suppression(self) -> None:
+        findings = self.lint("""
+            import tempfile
+            from tempfile import mktemp
+
+            path1 = tempfile.mktemp()  # noqa: SLP019
+            path2 = mktemp()  # slop: ignore [SLP019]
+        """)
+
+        self.assertNotIn("SLP019", [item.code for item in findings])
+
+    def test_insecure_temp_file_ignores_safe_and_shadowed_calls(self) -> None:
+        findings = self.lint("""
+            import tempfile
+
+            with tempfile.NamedTemporaryFile() as tmp:
+                pass
+
+            class CustomBuilder:
+                def mktemp(self):
+                    return "custom"
+
+            builder = CustomBuilder()
+            builder.mktemp()
+        """)
+
+        self.assertNotIn("SLP019", [item.code for item in findings])
+
     def test_finding_evidence_and_fingerprint_are_structured(self) -> None:
         original = self.lint("""
             import subprocess

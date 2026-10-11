@@ -1,0 +1,8 @@
+import tempfile
+from pathlib import Path
+
+
+def write_scratch_data(content: str) -> Path:
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+        handle.write(content)
+        return Path(handle.name)

@@ -30,13 +30,14 @@ class DifferentialCorpusTests(unittest.TestCase):
         self,
     ) -> None:
         manifest = load_manifest()
-        variants = {
-            case.get("variant")
-            for case in manifest["cases"]
-            if case.get("rule") == "SLP018"
-        }
-
-        self.assertEqual(variants, {"positive", "corrected", "false_positive"})
+        for rule in ("SLP018", "SLP019"):
+            with self.subTest(rule=rule):
+                variants = {
+                    case.get("variant")
+                    for case in manifest["cases"]
+                    if case.get("rule") == rule
+                }
+                self.assertEqual(variants, {"positive", "corrected", "false_positive"})
 
 
 if __name__ == "__main__":

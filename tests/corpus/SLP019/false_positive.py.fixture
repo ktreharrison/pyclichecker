@@ -1,0 +1,7 @@
+class CustomStorage:
+    def mktemp(self, suffix: str = "") -> str:
+        return f"scratch{suffix}"
+
+
+def make_scratch_path(storage: CustomStorage) -> str:
+    return storage.mktemp(suffix=".txt")

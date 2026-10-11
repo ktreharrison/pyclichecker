@@ -8,6 +8,7 @@
   only on findings absent from a prior JSON result.
 - Added `SLP018` for discarded return statuses from `os.system` and
   `subprocess.call`.
+- Added `SLP019` for insecure temporary file creation via `tempfile.mktemp`.
 - Added an executable differential corpus for Ruff, Pyright, ty, and
   pyclichecker, plus explicit source-encoding regression coverage.
 - Documented pyclichecker's place beside formatters, general linters, type

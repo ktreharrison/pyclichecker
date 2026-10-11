@@ -112,6 +112,45 @@
         "pyright": [],
         "ty": []
       }
+    },
+    {
+      "id": "insecure-temp-file",
+      "kind": "true-positive",
+      "rule": "SLP019",
+      "variant": "positive",
+      "source": "SLP019/positive.py.fixture",
+      "expected": {
+        "pyclichecker": ["SLP019"],
+        "ruff": ["S306"],
+        "pyright": [],
+        "ty": ["deprecated"]
+      }
+    },
+    {
+      "id": "insecure-temp-file-corrected",
+      "kind": "false-positive-guard",
+      "rule": "SLP019",
+      "variant": "corrected",
+      "source": "SLP019/corrected.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": [],
+        "pyright": [],
+        "ty": []
+      }
+    },
+    {
+      "id": "insecure-temp-file-shadowed",
+      "kind": "false-positive-guard",
+      "rule": "SLP019",
+      "variant": "false_positive",
+      "source": "SLP019/false_positive.py.fixture",
+      "expected": {
+        "pyclichecker": [],
+        "ruff": [],
+        "pyright": [],
+        "ty": []
+      }
     }
   ]
 }

@@ -394,7 +394,7 @@ def _match_exit_kinds(node: ast.Match, aliases: dict[str, str]) -> set[str]:
 def _literal_comparison_value(node: ast.AST) -> tuple[bool, object]:
     try:
         value: object = ast.literal_eval(node)
-    except MemoryError, RecursionError, SyntaxError, TypeError, ValueError:
+    except (MemoryError, RecursionError, SyntaxError, TypeError, ValueError):
         return False, None
     return True, value
 
@@ -429,7 +429,7 @@ def _literal_comparison_result(
                 return left is right
             if isinstance(comparison, ast.IsNot):
                 return left is not right
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     return None
 
@@ -2186,6 +2186,7 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.command_status_calls: list[OperationalCall] = []
         self.network_calls: list[OperationalCall] = []
         self.http_calls: list[OperationalCall] = []
+        self.tempfile_mktemp_calls: list[OperationalCall] = []
 
     def visit_Call(self, node: ast.Call) -> None:
         aliases = _aliases_for_scope_snapshot(
@@ -2199,6 +2200,10 @@ class _OperationalCallVisitor(ast.NodeVisitor):
             self.subprocess_calls.append(OperationalCall(node, qualified_name, aliases))
         if qualified_name in {"os.system", "subprocess.call"}:
             self.command_status_calls.append(
+                OperationalCall(node, qualified_name, aliases)
+            )
+        if qualified_name == "tempfile.mktemp":
+            self.tempfile_mktemp_calls.append(
                 OperationalCall(node, qualified_name, aliases)
             )
         if _is_timeout_call(qualified_name):
@@ -4114,7 +4119,7 @@ def _http_status_collection_is_successful(
         arguments.append(value)
     try:
         status_range = range(*arguments)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return False
     if not status_range:
         return False
@@ -8847,6 +8852,19 @@ class SlopVisitor(ast.NodeVisitor):
             ),
         )
 
+    def _check_tempfile_calls(self, calls: Sequence[OperationalCall]) -> None:
+        for call in calls:
+            self.add_finding(
+                call.node,
+                "SLP019",
+                f"`{call.qualified_name}` creates an insecure temporary file name; "
+                "use `tempfile.NamedTemporaryFile` or `tempfile.TemporaryDirectory`",
+                evidence=(
+                    f"resolved call is `{call.qualified_name}`",
+                    "mktemp is vulnerable to symlink and race-condition attacks",
+                ),
+            )
+
     def _check_operational_scope(
         self,
         body: Sequence[ast.stmt],
@@ -8892,6 +8910,8 @@ class SlopVisitor(ast.NodeVisitor):
                     "every normal continuation",
                 ),
             )
+
+        self._check_tempfile_calls(visitor.tempfile_mktemp_calls)
 
         for call in visitor.network_calls:
             if _call_has_timeout(call.node, call.qualified_name):
@@ -9099,7 +9119,7 @@ def _collect_header_suppression_lines(
 ) -> dict[int, set[int]]:
     try:
         tokens = tuple(tokenize.generate_tokens(io.StringIO(source).readline))
-    except IndentationError, tokenize.TokenError:
+    except (IndentationError, tokenize.TokenError):
         return {}
     token_starts = tuple(token.start for token in tokens)
     compound_types = (

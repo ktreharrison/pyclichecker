@@ -123,6 +123,7 @@ pattern. It does not prove that the behavior is unintended.
 | `SLP016` | warning | Instance state initialized on only some constructor paths | Initialize the attribute unconditionally before other methods can read it. |
 | `SLP017` | warning | Shared mutable class state changed through an instance in production code | Initialize it per instance or mark intentional shared state as `ClassVar`. |
 | `SLP018` | warning | Return status from `os.system` or `subprocess.call` is discarded | Inspect or return the status, or use a raising subprocess API. |
+| `SLP019` | warning | Insecure temporary file creation via `tempfile.mktemp` | Use `NamedTemporaryFile` or `TemporaryDirectory` instead of deprecated `mktemp`. |
 
 Rule selection accepts exact codes or prefixes:
 

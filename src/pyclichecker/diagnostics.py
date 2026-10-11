@@ -135,6 +135,12 @@ RULES = {
             "ignored-command-status",
             "os.system or subprocess.call return status is discarded.",
         ),
+        Rule(
+            "SLP019",
+            "warning",
+            "insecure-temp-file",
+            "tempfile.mktemp creates an insecure temporary file name; use NamedTemporaryFile or TemporaryDirectory.",
+        ),
     )
 }
 

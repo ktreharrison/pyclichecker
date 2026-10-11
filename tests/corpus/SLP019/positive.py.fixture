@@ -1,0 +1,8 @@
+import tempfile
+
+
+def write_scratch_data(content: str) -> str:
+    path = tempfile.mktemp(suffix=".txt")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    return path
