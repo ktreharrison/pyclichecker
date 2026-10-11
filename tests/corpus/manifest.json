@@ -84,7 +84,7 @@
         "pyclichecker": ["SLP018"],
         "ruff": ["S605", "S607"],
         "pyright": [],
-        "ty": ["deprecated"]
+        "ty": []
       }
     },
     {
@@ -97,7 +97,7 @@
         "pyclichecker": [],
         "ruff": ["S605", "S607"],
         "pyright": [],
-        "ty": ["deprecated"]
+        "ty": []
       }
     },
     {
