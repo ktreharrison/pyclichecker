@@ -137,6 +137,7 @@ class RuleTests(unittest.TestCase):
             def recursive():
                 def walk(node):
                     pass
+                walk(None)
                 return None
 
             def called():
@@ -226,6 +227,55 @@ class RuleTests(unittest.TestCase):
             enabled_codes=frozenset({"SLP020"}),
         )
         self.assert_codes(only_slp020, ["SLP020"])
+
+    def test_ignoring_slp020_hides_reclassified_placeholders(self) -> None:
+        source = """
+            class Base:
+                def required(self):
+                    raise NotImplementedError
+            """
+        ignored = self.lint(source, ignored_codes=frozenset({"SLP020"}))
+        self.assertEqual(ignored, [])
+
+    def test_escape_requires_pass_return_or_store(self) -> None:
+        findings = self.lint("""
+            def truth_test():
+                def handler():
+                    pass
+                if handler:
+                    return 1
+
+            def attribute_read():
+                def handler():
+                    pass
+                return handler.__name__
+
+            def escaped_then_rebound():
+                def handler():
+                    pass
+                register(handler)
+                handler = None
+            """)
+        self.assert_codes(findings, ["SLP001", "SLP001", "SLP020"])
+
+    def test_non_registering_decorators_resolve_aliases(self) -> None:
+        findings = self.lint("""
+            import functools as ft
+            import typing as t
+
+            def build():
+                @ft.wraps(build)
+                def wrapped():
+                    pass
+                wrapped()
+
+            def mark():
+                @t.final
+                def marked():
+                    pass
+                marked()
+            """)
+        self.assert_codes(findings, ["SLP001", "SLP001"])
 
     def test_cli_ignore_slp001_hides_reclassified_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
