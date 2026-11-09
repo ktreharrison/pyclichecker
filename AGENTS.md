@@ -7,7 +7,7 @@ Python quality defects associated with rushed or generated code.
 
 ## Runtime
 
-- The project requires Python 3.14.
+- The project requires Python 3.12 or newer.
 - Package and environment operations use `uv`.
 - Runtime code has no third-party dependencies.
 - MUST NOT add a runtime dependency when the standard library provides a clear implementation.
