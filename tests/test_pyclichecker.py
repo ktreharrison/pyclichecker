@@ -204,6 +204,7 @@ class RuleTests(unittest.TestCase):
             enabled_codes=frozenset(pyclichecker.RULES) - {"SLP020"},
         )
         self.assert_codes(without_slp020, ["SLP001"])
+
         self.assertEqual(default[0].fingerprint, only_slp001[0].fingerprint)
 
     def test_placeholder_rule_resolves_aliased_contract_declarations(self) -> None:
