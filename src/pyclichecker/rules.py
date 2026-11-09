@@ -379,8 +379,16 @@ class _EscapeScanner:
             for decorator in node.decorator_list:
                 self.visit(decorator, node)
         for default in (*node.args.defaults, *node.args.kw_defaults):
-            if default is not None:
-                self.visit(default, node)
+            if default is None:
+                continue
+            if (
+                self.started
+                and isinstance(default, ast.Name)
+                and default.id == self.name
+            ):
+                self.escaped = True
+                return
+            self.visit(default, node)
 
     def visit_name(self, node: ast.Name, parent: ast.AST | None) -> None:
         if not isinstance(node.ctx, ast.Load):
