@@ -63,6 +63,73 @@ class RuleTests(unittest.TestCase):
         self.assert_codes(findings, ["SLP001"])
         self.assertIn("concrete", findings[0].message)
 
+    def test_placeholder_with_intent_signals_is_downgraded_not_dropped(self) -> None:
+        findings = self.lint("""
+            class Base:
+                def required(self):
+                    raise NotImplementedError
+
+                def hook(self):
+                    \"\"\"Does nothing by default; subclasses may override it.\"\"\"
+                    pass
+
+            def make_callback():
+                def on_event(event):
+                    pass
+                return on_event
+
+            @app.callback()
+            def main():
+                pass
+            """)
+
+        self.assert_codes(findings, ["SLP020", "SLP020", "SLP020", "SLP020"])
+        self.assertEqual({finding.severity for finding in findings}, {"warning"})
+        self.assertEqual({finding.confidence for finding in findings}, {"low"})
+
+    def test_unfinished_nested_and_concrete_placeholders_stay_slp001(self) -> None:
+        findings = self.lint("""
+            def make_handler():
+                def handle_error(error):
+                    pass
+                def handle_retry(attempt):
+                    ...
+                return None
+
+            class Service:
+                def save(self, record):
+                    pass
+
+                def fetch(self, key):
+                    \"\"\"Fetch the record from the store.\"\"\"
+                    pass
+
+            def load_config():
+                raise NotImplementedError
+            """)
+
+        self.assert_codes(findings, ["SLP001", "SLP001", "SLP001", "SLP001", "SLP001"])
+
+    def test_explicit_contract_exemptions_are_unchanged(self) -> None:
+        findings = self.lint("""
+            from abc import abstractmethod
+            from typing import Protocol, overload
+
+            class Abstract:
+                @abstractmethod
+                def required(self):
+                    raise NotImplementedError
+
+            class Contract(Protocol):
+                def required(self):
+                    ...
+
+            @overload
+            def parse(value: int) -> int: ...
+            """)
+
+        self.assertEqual(findings, [])
+
     def test_placeholder_rule_resolves_aliased_contract_declarations(self) -> None:
         findings = self.lint("""
             import abc as contracts
