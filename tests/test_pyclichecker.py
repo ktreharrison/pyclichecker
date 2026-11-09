@@ -130,6 +130,82 @@ class RuleTests(unittest.TestCase):
 
         self.assertEqual(findings, [])
 
+    def test_nested_placeholder_that_is_only_called_or_shadowed_stays_slp001(
+        self,
+    ) -> None:
+        findings = self.lint("""
+            def recursive():
+                def walk(node):
+                    pass
+                return None
+
+            def called():
+                def helper():
+                    pass
+                helper()
+
+            def shadowed():
+                def handler(event):
+                    pass
+                handler = None
+                return handler
+
+            def deeper_scope():
+                def handler(event):
+                    pass
+                def other():
+                    return handler
+                return other
+            """)
+
+        self.assert_codes(findings, ["SLP001"] * 4)
+
+    def test_registration_decorators_are_downgraded_and_others_are_not(self) -> None:
+        findings = self.lint("""
+            import functools
+
+            @register()
+            def registered():
+                pass
+
+            @app.command()
+            def command():
+                pass
+
+            @functools.wraps(target)
+            def wrapped():
+                pass
+
+            @functools.lru_cache()
+            def cached():
+                pass
+            """)
+
+        self.assert_codes(findings, ["SLP020", "SLP020", "SLP001", "SLP001"])
+
+    def test_reclassified_placeholders_keep_slp001_compatibility(self) -> None:
+        source = """
+            class Base:
+                def required(self):  # noqa: SLP001
+                    raise NotImplementedError
+
+                def other(self):
+                    raise NotImplementedError
+            """
+
+        default = self.lint(source)
+        self.assert_codes(default, ["SLP020"])
+
+        only_slp001 = self.lint(source, enabled_codes=frozenset({"SLP001"}))
+        self.assert_codes(only_slp001, ["SLP001"])
+
+        without_slp020 = self.lint(
+            source,
+            enabled_codes=frozenset(pyclichecker.RULES) - {"SLP020"},
+        )
+        self.assert_codes(without_slp020, ["SLP001"])
+        self.assertEqual(default[0].fingerprint, only_slp001[0].fingerprint)
+
     def test_placeholder_rule_resolves_aliased_contract_declarations(self) -> None:
         findings = self.lint("""
             import abc as contracts
