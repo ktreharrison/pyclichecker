@@ -250,13 +250,20 @@ class RuleTests(unittest.TestCase):
                     pass
                 return handler.__name__
 
+            def default_argument():
+                def handler():
+                    pass
+                def other(callback=handler):
+                    return callback
+                return other
+
             def escaped_then_rebound():
                 def handler():
                     pass
                 register(handler)
                 handler = None
             """)
-        self.assert_codes(findings, ["SLP001", "SLP001", "SLP020"])
+        self.assert_codes(findings, ["SLP001", "SLP001", "SLP020", "SLP020"])
 
     def test_non_registering_decorators_resolve_aliases(self) -> None:
         findings = self.lint("""
