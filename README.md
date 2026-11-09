@@ -124,7 +124,7 @@ pattern. It does not prove that the behavior is unintended.
 | `SLP017` | warning | Shared mutable class state changed through an instance in production code | Initialize it per instance or mark intentional shared state as `ClassVar`. |
 | `SLP018` | warning | Return status from `os.system` or `subprocess.call` is discarded | Inspect or return the status, or use a raising subprocess API. |
 | `SLP019` | warning | Insecure temporary file creation via `tempfile.mktemp` | Use `NamedTemporaryFile` or `TemporaryDirectory` instead of deprecated `mktemp`. |
-| `SLP020` | warning | Placeholder that may be an intentional extension point or callback | Implement it, mark it with `abc.abstractmethod`, or suppress it with a reason. Still fails the default `--fail-on warning`. |
+| `SLP020` | warning | Placeholder that may be an intentional extension point or callback | Implement it, mark it with `abc.abstractmethod`, or suppress it with a reason. Still fails the default `--fail-on warning`. Existing `SLP001` suppressions, baselines, `--select` and `--ignore` settings still apply to it. |
 
 Rule selection accepts exact codes or prefixes:
 
