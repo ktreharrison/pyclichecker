@@ -8583,7 +8583,10 @@ class SlopVisitor(ast.NodeVisitor):
                         "the effective function body contains only a placeholder statement",
                     ),
                 )
-            elif "SLP020" in self.config.enabled_codes:
+            elif (
+                "SLP020" in self.config.enabled_codes
+                and "SLP001" not in self.config.ignored_codes
+            ):
                 self.add_finding(
                     record.node,
                     "SLP020",
