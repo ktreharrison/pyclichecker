@@ -11,6 +11,7 @@ class LintConfig:
     """Resolved configuration for one lint run."""
 
     enabled_codes: frozenset[str] = frozenset(RULES)
+    ignored_codes: frozenset[str] = frozenset()
     max_function_lines: int = 80
     narrating_comment_threshold: int = 3
     duplicate_min_statements: int = 4
