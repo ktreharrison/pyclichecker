@@ -33,7 +33,7 @@ the tools and examples where their findings overlap.
 
 ## Quick start
 
-The project requires Python 3.14. Run it directly without installing:
+pyclichecker requires Python 3.12 or newer. Run it directly without installing:
 
 ```bash
 uvx pyclichecker .
@@ -124,6 +124,7 @@ pattern. It does not prove that the behavior is unintended.
 | `SLP017` | warning | Shared mutable class state changed through an instance in production code | Initialize it per instance or mark intentional shared state as `ClassVar`. |
 | `SLP018` | warning | Return status from `os.system` or `subprocess.call` is discarded | Inspect or return the status, or use a raising subprocess API. |
 | `SLP019` | warning | Insecure temporary file creation via `tempfile.mktemp` | Use `NamedTemporaryFile` or `TemporaryDirectory` instead of deprecated `mktemp`. |
+| `SLP020` | warning | Placeholder that may be an intentional extension point or callback | Implement it, mark it with `abc.abstractmethod`, or suppress it with a reason. Still fails the default `--fail-on warning`. |
 
 Rule selection accepts exact codes or prefixes:
 
@@ -283,7 +284,7 @@ uvx --from . pyclichecker --version
 See [CONTRIBUTING.md](CONTRIBUTING.md) for rule and pull-request requirements.
 
 The GitHub Actions workflow runs the complete validation suite with CPython
-3.14 on Linux, macOS, and Windows.
+3.12, 3.13 and 3.14 on Linux, macOS, and Windows.
 
 ## License
 
