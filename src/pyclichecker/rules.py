@@ -307,6 +307,9 @@ def _effective_body(body: Sequence[ast.stmt]) -> tuple[ast.stmt, ...]:
     return result
 
 
+_EXTENSION_POINT_WORDS = ("subclass", "override", "by default", "no-op", "hook")
+
+
 def _is_placeholder_body(body: Sequence[ast.stmt]) -> bool:
     if len(body) != 1:
         return False
@@ -7259,6 +7262,8 @@ class SlopVisitor(ast.NodeVisitor):
         self.functions: list[FunctionRecord] = []
         self.scope: list[str] = []
         self.protocol_stack: list[bool] = []
+        self.kind_stack: list[str] = []
+        self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.unittest_case_stack: list[bool] = []
         self.unittest_case_classes: set[str] = set()
         self.alias_stack: list[dict[str, str]] = [{}]
@@ -8134,6 +8139,7 @@ class SlopVisitor(ast.NodeVisitor):
             self._check_class_correctness(node)
         self.scope.append(node.name)
         self.protocol_stack.append(is_protocol)
+        self.kind_stack.append("class")
         self.unittest_case_stack.append(is_unittest_case)
         class_aliases = dict(outer_aliases)
         self.alias_stack.append(class_aliases)
@@ -8152,6 +8158,7 @@ class SlopVisitor(ast.NodeVisitor):
         self.alias_stack.pop()
         self.unittest_case_stack.pop()
         self.protocol_stack.pop()
+        self.kind_stack.pop()
         self.scope.pop()
 
     def _base_is_unittest_case(
@@ -8447,6 +8454,34 @@ class SlopVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node, is_async=True)
 
+    def _extension_point_reason(self, record: FunctionRecord) -> str | None:
+        """Return why a placeholder may be intentional, or None when it is not."""
+
+        if any(
+            isinstance(_decorator_expression(decorator), ast.Call | ast.Attribute)
+            for decorator in record.node.decorator_list
+        ):
+            return "it is registered through a decorator such as a command or callback"
+        enclosing = self.kind_stack[-1] if self.kind_stack else ""
+        statement = record.effective_body[0]
+        if enclosing == "class":
+            if isinstance(statement, ast.Raise):
+                return "a class method raises NotImplementedError without abc.abstractmethod"
+            docstring = (ast.get_docstring(record.node) or "").lower()
+            if any(word in docstring for word in _EXTENSION_POINT_WORDS):
+                return "its docstring describes a subclass hook or default"
+            return None
+        if enclosing == "function" and self.function_stack:
+            name = record.node.name
+            for child in ast.walk(self.function_stack[-1]):
+                if (
+                    isinstance(child, ast.Name)
+                    and isinstance(child.ctx, ast.Load)
+                    and child.id == name
+                ):
+                    return "a nested function is passed, returned or stored by its enclosing function"
+        return None
+
     def _check_function_definition(
         self,
         record: FunctionRecord,
@@ -8457,14 +8492,25 @@ class SlopVisitor(ast.NodeVisitor):
         decorator_aliases: dict[str, str],
     ) -> None:
         if placeholder and not record.exempt:
-            self.add_finding(
-                record.node,
-                "SLP001",
-                f"`{record.qualified_name}` is a concrete placeholder implementation",
-                evidence=(
-                    "the effective function body contains only a placeholder statement",
-                ),
-            )
+            reason = self._extension_point_reason(record)
+            if reason is None:
+                self.add_finding(
+                    record.node,
+                    "SLP001",
+                    f"`{record.qualified_name}` is a concrete placeholder implementation",
+                    evidence=(
+                        "the effective function body contains only a placeholder statement",
+                    ),
+                )
+            else:
+                self.add_finding(
+                    record.node,
+                    "SLP020",
+                    f"`{record.qualified_name}` is a placeholder that may be an "
+                    "intentional extension point; implement it, mark it "
+                    "abstract, or suppress this finding",
+                    evidence=(reason,),
+                )
         self._check_test_function(
             record,
             placeholder=placeholder,
@@ -8542,6 +8588,8 @@ class SlopVisitor(ast.NodeVisitor):
                 self.visit(child)
 
         self.scope.append(node.name)
+        self.kind_stack.append("function")
+        self.function_stack.append(node)
         self.alias_stack.append(function_entry_aliases)
         self._visit_definition_block(
             node.body,
@@ -8566,6 +8614,8 @@ class SlopVisitor(ast.NodeVisitor):
                     ),
                 )
         self.alias_stack.pop()
+        self.function_stack.pop()
+        self.kind_stack.pop()
         self.scope.pop()
 
     def _check_test_function(
