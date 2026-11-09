@@ -207,6 +207,47 @@ class RuleTests(unittest.TestCase):
 
         self.assertEqual(default[0].fingerprint, only_slp001[0].fingerprint)
 
+    def test_ignoring_slp001_still_hides_reclassified_placeholders(self) -> None:
+        source = """
+            class Base:
+                def required(self):
+                    raise NotImplementedError
+            """
+
+        ignored = self.lint(
+            source,
+            enabled_codes=frozenset(pyclichecker.RULES) - {"SLP001"},
+            ignored_codes=frozenset({"SLP001"}),
+        )
+        self.assertEqual(ignored, [])
+
+        only_slp020 = self.lint(
+            source,
+            enabled_codes=frozenset({"SLP020"}),
+        )
+        self.assert_codes(only_slp020, ["SLP020"])
+
+    def test_cli_ignore_slp001_hides_reclassified_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "app.py"
+            path.write_text(
+                "class Base:\n    def required(self):\n        raise NotImplementedError\n",
+                encoding="utf-8",
+            )
+            outputs = {}
+            for arguments in ([], ["--ignore", "SLP001"], ["--select", "SLP001"]):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    pyclichecker.main([str(path), "--format", "json", *arguments])
+                outputs[tuple(arguments)] = [
+                    finding["code"]
+                    for finding in json.loads(stdout.getvalue())["findings"]
+                ]
+
+        self.assertEqual(outputs[()], ["SLP020"])
+        self.assertEqual(outputs[("--ignore", "SLP001")], [])
+        self.assertEqual(outputs[("--select", "SLP001")], ["SLP001"])
+
     def test_placeholder_rule_resolves_aliased_contract_declarations(self) -> None:
         findings = self.lint("""
             import abc as contracts
