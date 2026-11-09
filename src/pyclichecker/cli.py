@@ -247,6 +247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ignored = _expand_codes(arguments.ignore, parser) if arguments.ignore else set()
     config = LintConfig(
         enabled_codes=frozenset(selected - ignored),
+        ignored_codes=frozenset(ignored),
         max_function_lines=arguments.max_function_lines,
         narrating_comment_threshold=arguments.narrating_comments,
         duplicate_min_statements=arguments.duplicate_min_statements,
