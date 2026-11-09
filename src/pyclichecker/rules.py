@@ -308,31 +308,104 @@ def _effective_body(body: Sequence[ast.stmt]) -> tuple[ast.stmt, ...]:
 
 
 _EXTENSION_POINT_WORDS = ("subclass", "override", "by default", "no-op", "hook")
-_NON_REGISTERING_DECORATORS = frozenset(
+_NON_REGISTERING_MODULES = frozenset(
     {
-        "cache",
-        "cached_property",
-        "contextmanager",
-        "asynccontextmanager",
-        "deleter",
-        "deprecated",
-        "getter",
-        "lru_cache",
-        "no_type_check",
-        "override",
-        "setter",
-        "wraps",
+        "abc",
+        "contextlib",
+        "dataclasses",
+        "enum",
+        "functools",
+        "typing",
+        "typing_extensions",
+        "unittest",
+        "warnings",
     }
 )
+_NON_REGISTERING_ATTRIBUTES = frozenset({"deleter", "getter", "setter"})
 
 
-def _is_registering_decorator(decorator: ast.expr) -> bool:
-    """Return True for a call or attribute decorator that may register a callback."""
+def _is_registering_decorator(decorator: ast.expr, aliases: dict[str, str]) -> bool:
+    """Return True for a call or attribute decorator that may register a callback.
+
+    Decorators that resolve to standard-library modules which only wrap or
+    annotate functions, and property accessors, do not count.
+    """
 
     if not isinstance(decorator, ast.Call | ast.Attribute):
         return False
-    name = _expression_name(_decorator_expression(decorator)).split(".")[-1]
-    return name not in _NON_REGISTERING_DECORATORS
+    raw_name = _expression_name(_decorator_expression(decorator))
+    if raw_name.split(".")[-1] in _NON_REGISTERING_ATTRIBUTES:
+        return False
+    qualified_name = _resolve_imported_name(raw_name, aliases)
+    return qualified_name.split(".")[0] not in _NON_REGISTERING_MODULES
+
+
+def _expression_escapes_name(node: ast.Name, parent: ast.AST | None) -> bool:
+    """Return True when ``node`` is passed, returned, stored or yielded."""
+
+    if isinstance(parent, ast.Call):
+        return parent.func is not node
+    return isinstance(
+        parent,
+        ast.keyword
+        | ast.Return
+        | ast.Yield
+        | ast.YieldFrom
+        | ast.Starred
+        | ast.List
+        | ast.Tuple
+        | ast.Set
+        | ast.Assign
+        | ast.AnnAssign
+        | ast.AugAssign
+        | ast.NamedExpr,
+    ) or (isinstance(parent, ast.Dict) and node in parent.values)
+
+
+class _EscapeScanner:
+    """Walk the enclosing scope in source order looking for an escape of a name."""
+
+    def __init__(self, nested: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.nested = nested
+        self.name = nested.name
+        self.started = False
+        self.stopped = False
+        self.escaped = False
+
+    def visit_signature(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        if not isinstance(node, ast.Lambda):
+            for decorator in node.decorator_list:
+                self.visit(decorator, node)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default, node)
+
+    def visit_name(self, node: ast.Name, parent: ast.AST | None) -> None:
+        if not isinstance(node.ctx, ast.Load):
+            self.stopped = True
+        elif _expression_escapes_name(node, parent):
+            self.escaped = True
+
+    def visit(self, node: ast.AST, parent: ast.AST | None) -> None:
+        if self.stopped or self.escaped:
+            return
+        if node is self.nested:
+            self.started = True
+            return
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            self.visit_signature(node)
+            if getattr(node, "name", None) == self.name and self.started:
+                self.stopped = True
+            return
+        if isinstance(node, ast.Name) and node.id == self.name and self.started:
+            self.visit_name(node, parent)
+            return
+        for child in ast.iter_child_nodes(node):
+            self.visit(child, node)
+        if isinstance(node, ast.ClassDef) and node.name == self.name and self.started:
+            self.stopped = True
 
 
 def _nested_function_escapes(
@@ -341,47 +414,17 @@ def _nested_function_escapes(
 ) -> bool:
     """Return True when the enclosing scope passes, returns or stores ``nested``.
 
-    Direct calls, recursion, references from deeper scopes and rebound names do
-    not count.
+    References are read in source order after the nested definition. Direct
+    calls, truth tests and attribute reads do not count. A later rebinding of
+    the name stops the search but does not cancel an earlier escape. Bodies of
+    other functions and lambdas are not searched; their defaults, decorators and
+    class bodies are.
     """
 
-    name = nested.name
-    state = {"escaped": False, "rebound": False}
-    all_arguments = (
-        *enclosing.args.posonlyargs,
-        *enclosing.args.args,
-        *enclosing.args.kwonlyargs,
-        *(
-            argument
-            for argument in (enclosing.args.vararg, enclosing.args.kwarg)
-            if argument
-        ),
-    )
-    if any(argument.arg == name for argument in all_arguments):
-        return False
-
-    def visit(node: ast.AST, parent: ast.AST | None) -> None:
-        if node is nested:
-            return
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            if node.name == name:
-                state["rebound"] = True
-            for decorator in node.decorator_list:
-                visit(decorator, node)
-            return
-        if isinstance(node, ast.Lambda):
-            return
-        if isinstance(node, ast.Name) and node.id == name:
-            if not isinstance(node.ctx, ast.Load):
-                state["rebound"] = True
-            elif not (isinstance(parent, ast.Call) and parent.func is node):
-                state["escaped"] = True
-        for child in ast.iter_child_nodes(node):
-            visit(child, node)
-
+    scanner = _EscapeScanner(nested)
     for statement in enclosing.body:
-        visit(statement, enclosing)
-    return state["escaped"] and not state["rebound"]
+        scanner.visit(statement, enclosing)
+    return scanner.escaped
 
 
 def _is_placeholder_body(body: Sequence[ast.stmt]) -> bool:
@@ -8545,7 +8588,7 @@ class SlopVisitor(ast.NodeVisitor):
         """Return why a placeholder may be intentional, or None when it is not."""
 
         if any(
-            _is_registering_decorator(decorator)
+            _is_registering_decorator(decorator, self.alias_stack[-1])
             for decorator in record.node.decorator_list
         ):
             return "it is registered through a decorator such as a command or callback"
@@ -8574,7 +8617,11 @@ class SlopVisitor(ast.NodeVisitor):
     ) -> None:
         if placeholder and not record.exempt:
             reason = self._extension_point_reason(record)
-            if reason is None:
+            if reason is not None and (
+                {"SLP001", "SLP020"} & self.config.ignored_codes
+            ):
+                pass
+            elif reason is None or "SLP020" not in self.config.enabled_codes:
                 self.add_finding(
                     record.node,
                     "SLP001",
@@ -8583,10 +8630,7 @@ class SlopVisitor(ast.NodeVisitor):
                         "the effective function body contains only a placeholder statement",
                     ),
                 )
-            elif (
-                "SLP020" in self.config.enabled_codes
-                and "SLP001" not in self.config.ignored_codes
-            ):
+            else:
                 self.add_finding(
                     record.node,
                     "SLP020",
@@ -8595,15 +8639,6 @@ class SlopVisitor(ast.NodeVisitor):
                     "abstract, or suppress this finding",
                     evidence=(reason,),
                     legacy_code="SLP001",
-                )
-            else:
-                self.add_finding(
-                    record.node,
-                    "SLP001",
-                    f"`{record.qualified_name}` is a concrete placeholder implementation",
-                    evidence=(
-                        "the effective function body contains only a placeholder statement",
-                    ),
                 )
         self._check_test_function(
             record,
