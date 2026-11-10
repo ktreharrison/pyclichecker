@@ -141,6 +141,13 @@ RULES = {
             "insecure-temp-file",
             "tempfile.mktemp creates an insecure temporary file name; use NamedTemporaryFile or TemporaryDirectory.",
         ),
+        Rule(
+            "SLP020",
+            "warning",
+            "possible-extension-point",
+            "Placeholder body that may be an intentional extension point or callback.",
+            "low",
+        ),
     )
 }
 

@@ -5,7 +5,7 @@ easier to use are welcome.
 
 ## Development setup
 
-The project requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+The project requires Python 3.12 or newer and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/ktreharrison/pyclichecker.git
