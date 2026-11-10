@@ -15,6 +15,7 @@ class LintConfig:
     narrating_comment_threshold: int = 3
     duplicate_min_statements: int = 4
     duplicate_min_lines: int = 6
+    ignored_codes: frozenset[str] = frozenset()
 
 
 def parse_rule_codes(value: str) -> set[str]:
