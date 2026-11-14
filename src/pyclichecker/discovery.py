@@ -43,8 +43,15 @@ def _python_files_in_directory(
     root: Path,
     *,
     exclude_patterns: Sequence[str],
+    errors: list[str],
 ) -> Iterable[Path]:
-    for current, directories, files in os.walk(root):
+    def record(error: OSError) -> None:
+        # os.walk skips unreadable directories silently by default, which
+        # reported an incomplete scan as clean (exit 0). An unread directory
+        # is an operational error.
+        errors.append(f"cannot read directory {error.filename}: {error.strerror}")
+
+    for current, directories, files in os.walk(root, onerror=record):
         current_path = Path(current)
         relative_current = current_path.relative_to(root)
         directories[:] = sorted(
@@ -93,6 +100,7 @@ def discover_python_files(
             candidates = _python_files_in_directory(
                 path,
                 exclude_patterns=exclude_patterns,
+                errors=errors,
             )
         else:
             errors.append(f"unsupported path type: {raw_input}")

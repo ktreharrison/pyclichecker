@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import re
 import tempfile
 import textwrap
@@ -7537,6 +7538,27 @@ class TimeoutKeywordExpansionTests(unittest.TestCase):
 
     def test_plain_missing_timeout_is_still_reported(self) -> None:
         self.assertEqual(self.codes('requests.get("https://x")'), ["SLP010"])
+
+
+class UnreadableDirectoryTests(unittest.TestCase):
+    run_main = CliTests.run_main
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions")
+    def test_unreadable_subdirectory_is_an_operational_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "good.py").write_text("x = 1\n", encoding="utf-8")
+            hidden = root / "hidden"
+            hidden.mkdir()
+            (hidden / "bad.py").write_text("def f():\n    pass\n", encoding="utf-8")
+            hidden.chmod(0)
+            try:
+                exit_code, _, error = self.run_main([str(root)])
+            finally:
+                hidden.chmod(0o755)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("cannot read directory", error)
 
 
 if __name__ == "__main__":

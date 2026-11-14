@@ -15,6 +15,8 @@
 - `--ignore` with only separators (for example `","`) no longer ignores every rule.
 - `SLP010` no longer reports a missing timeout when the call passes `**options`
   that may carry it; a `**{...}` dict literal is still checked.
+- An unreadable subdirectory is now an operational error (exit 2); it was skipped
+  silently and the incomplete scan reported as clean.
 
 ## 2.5.0 - 2026-10-11
 
