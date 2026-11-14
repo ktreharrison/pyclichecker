@@ -6028,6 +6028,19 @@ def _call_has_timeout(node: ast.Call, qualified_name: str) -> bool:
             isinstance(positional_timeout, ast.Constant)
             and positional_timeout.value is None
         )
+    # `**options` may carry the timeout. A dict literal can be checked; any
+    # other mapping cannot, so give it the benefit of the doubt rather than
+    # report a timeout that may well be there.
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            continue
+        if not isinstance(keyword.value, ast.Dict):
+            return True
+        for key, value in zip(keyword.value.keys, keyword.value.values, strict=True):
+            if key is None:
+                return True
+            if isinstance(key, ast.Constant) and key.value == "timeout":
+                return not (isinstance(value, ast.Constant) and value.value is None)
     return False
 
 
