@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.6.0 - 2026-11-14
 
 - README: a Test code section on `SLP009` volume in tests and the existing
   `--exclude`, `--ignore` and `--baseline` options (#13). Rule severity is
