@@ -5147,16 +5147,36 @@ def _command_status_is_observed(
         parent = _parent_node(current)
 
     if isinstance(parent, ast.NamedExpr) and parent.value is current:
-        return True
+        # `(status := os.system(...))` as a bare statement binds the status
+        # but does not read it; any other walrus context reads it.
+        statement = _parent_node(parent)
+        if not (isinstance(statement, ast.Expr) and statement.value is parent):
+            return True
+        return _command_status_name_is_observed(call, parent.target.id, flow_index)
     if not isinstance(parent, (ast.Assign, ast.AnnAssign)):
         return not (isinstance(parent, ast.Expr) and parent.value is current)
 
-    result_name = _call_result_name(call.node)
-    if result_name is None:
+    targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+    if not all(isinstance(target, ast.Name) for target in targets):
+        # Stored into an attribute, subscript or unpacking: assume observed.
         return True
+    # `a = b = os.system(...)` binds the status to several names; it is
+    # observed when any of them is.
+    return any(
+        _command_status_name_is_observed(call, target.id, flow_index)
+        for target in targets
+        if isinstance(target, ast.Name)
+    )
+
+
+def _command_status_name_is_observed(
+    call: OperationalCall,
+    name: str,
+    flow_index: _OperationalFlowIndex,
+) -> bool:
     return _result_is_handled_after_assignment(
         call.node,
-        result_name,
+        name,
         _command_status_statement_observes_result,
         flow_index,
     )
@@ -5569,7 +5589,16 @@ def _binding_statement_handling_state(
         parent = _parent_node(current)
     if containing_statement is None:
         return None
-    if isinstance(parent, ast.NamedExpr) and parent.value is current:
+    if (
+        isinstance(parent, ast.NamedExpr)
+        and parent.value is current
+        and not (
+            isinstance(containing_statement, ast.Expr)
+            and containing_statement.value is parent
+        )
+    ):
+        # A bare `(name := call())` statement is an assignment; it falls
+        # through to the later-statement analysis below like `name = call()`.
         return _block_result_handling_state(
             (containing_statement,),
             name,

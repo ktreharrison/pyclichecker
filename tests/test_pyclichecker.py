@@ -7672,5 +7672,50 @@ class DefinitionTimeScopeTests(unittest.TestCase):
         )
 
 
+class CommandStatusBindingTests(unittest.TestCase):
+    def codes(self, body: str) -> list[str]:
+        source = "import os\n\ndef run():\n" + textwrap.indent(
+            textwrap.dedent(body), "    "
+        )
+        findings = pyclichecker.lint_source(
+            source, path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings if finding.code == "SLP018"]
+
+    def test_discarded_multi_target_and_walrus_bindings_are_reported(self) -> None:
+        self.assertEqual(self.codes('a = b = os.system("false")\n'), ["SLP018"])
+        self.assertEqual(self.codes('(status := os.system("false"))\n'), ["SLP018"])
+
+    def test_reading_any_bound_name_observes_the_status(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                a = b = os.system("false")
+                if b:
+                    raise SystemExit(b)
+                """),
+            [],
+        )
+        self.assertEqual(
+            self.codes("""
+                (status := os.system("false"))
+                if status:
+                    raise SystemExit(status)
+                """),
+            [],
+        )
+
+    def test_walrus_read_in_place_and_stored_targets_stay_observed(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                if (status := os.system("false")):
+                    raise SystemExit(status)
+                """),
+            [],
+        )
+        self.assertEqual(
+            self.codes('self_status = [os.system("x")]\nreturn self_status\n'), []
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
