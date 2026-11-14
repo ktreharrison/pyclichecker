@@ -2357,10 +2357,13 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.network_calls: list[OperationalCall] = []
         self.http_calls: list[OperationalCall] = []
         self.tempfile_mktemp_calls: list[OperationalCall] = []
-        # Depth inside code this scope's flow index does not model: class
-        # bodies and lambda bodies. Calls there are still checked by the rules
-        # that need no flow analysis (SLP010, SLP019).
+        # Depth inside lambda bodies, which this scope's flow index does not
+        # model. Calls there are still checked by the rules that need no flow
+        # analysis (SLP010, SLP019); see _check_operational_scope for why the
+        # flow-based rules skip lambdas.
         self.detached_depth = 0
+        # Class bodies are checked as scopes of their own.
+        self.class_defs: list[ast.ClassDef] = []
         # Lambda parameters and comprehension targets shadow module aliases
         # inside their scope.
         self.shadowed: list[set[str]] = []
@@ -2418,12 +2421,9 @@ class _OperationalCallVisitor(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for expression in (*node.decorator_list, *node.bases, *node.keywords):
             self.visit(expression)
-        # The class body runs once, at definition time. Methods inside it
-        # are visited for their decorators and defaults only.
-        self.detached_depth += 1
-        for statement in node.body:
-            self.visit(statement)
-        self.detached_depth -= 1
+        # The class body runs once, at definition time, as a straight-line
+        # block of its own; _check_operational_scope checks it separately.
+        self.class_defs.append(node)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self._visit_definition_time(node)
@@ -9296,7 +9296,23 @@ class SlopVisitor(ast.NodeVisitor):
         aliases: dict[str, str],
         *,
         local_names: set[str] | None = None,
+        class_scope: bool = False,
     ) -> None:
+        """Check the operational rules for one scope's statements.
+
+        Class bodies are their own scopes (``class_scope``): they run once at
+        definition time, so enclosing handlers do apply. A command status,
+        subprocess result or HTTP response bound to a name there becomes a
+        class attribute that other code can read, so it counts as observed.
+
+        Lambda bodies are not checked by the flow-based rules (SLP009, SLP018,
+        the HTTP status check). Their helpers resolve the containing statement
+        and enclosing exception handlers by walking parents, which would cross
+        into the defining scope, but a lambda runs later, outside those
+        handlers. SLP018 could not fire there anyway: a lambda has no
+        statements, so no expression statement can discard a status.
+        """
+
         visitor = _OperationalCallVisitor(
             aliases,
             self.node_aliases,
@@ -9304,6 +9320,23 @@ class SlopVisitor(ast.NodeVisitor):
         )
         for statement in body:
             visitor.visit(statement)
+        if class_scope:
+            # Class-level bindings are attributes; treat them as observed.
+            visitor.command_status_calls = [
+                call
+                for call in visitor.command_status_calls
+                if _call_result_name(call.node) is None
+            ]
+            visitor.subprocess_calls = [
+                call
+                for call in visitor.subprocess_calls
+                if _call_result_name(call.node) is None
+            ]
+            visitor.http_calls = [
+                call
+                for call in visitor.http_calls
+                if _call_result_name(call.node) is None
+            ]
         flow_indexes: dict[tuple[tuple[str, str], ...], _OperationalFlowIndex] = {}
 
         def flow_index_for(call: OperationalCall) -> _OperationalFlowIndex:
@@ -9365,6 +9398,14 @@ class SlopVisitor(ast.NodeVisitor):
                     f"resolved call is `{call.qualified_name}`",
                     "no HTTP success check covers every result-consuming path",
                 ),
+            )
+
+        for class_def in visitor.class_defs:
+            self._check_operational_scope(
+                class_def.body,
+                aliases,
+                local_names=local_names,
+                class_scope=True,
             )
 
     def _find_duplicate_implementations(self) -> None:
