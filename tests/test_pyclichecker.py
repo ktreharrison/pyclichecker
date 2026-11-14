@@ -7717,5 +7717,35 @@ class CommandStatusBindingTests(unittest.TestCase):
         )
 
 
+class CharacterColumnTests(unittest.TestCase):
+    def locations(self, source: str) -> list[tuple[int, int]]:
+        findings = pyclichecker.lint_source(
+            source, path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(finding.line, finding.column) for finding in findings]
+
+    def test_columns_count_characters_not_utf8_bytes(self) -> None:
+        self.assertEqual(
+            self.locations("import tempfile\né = 1; tempfile.mktemp()\n"), [(2, 8)]
+        )
+        self.assertEqual(
+            self.locations('import tempfile\nx = "🦀"; tempfile.mktemp()\n'), [(2, 10)]
+        )
+
+    def test_ascii_columns_and_fingerprints_are_unchanged(self) -> None:
+        ascii_source = "import tempfile\ne = 1; tempfile.mktemp()\n"
+        unicode_source = "import tempfile\né = 1; tempfile.mktemp()\n"
+        ascii_finding = pyclichecker.lint_source(ascii_source, path="app.py")[0]
+        unicode_finding = pyclichecker.lint_source(unicode_source, path="app.py")[0]
+        self.assertEqual(ascii_finding.column, 8)
+        self.assertEqual(ascii_finding.fingerprint, unicode_finding.fingerprint)
+
+    def test_form_feed_and_crlf_do_not_shift_lines(self) -> None:
+        self.assertEqual(
+            self.locations("import tempfile\r\n\x0c\r\né = 1; tempfile.mktemp()\r\n"),
+            [(3, 8)],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
