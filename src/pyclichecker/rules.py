@@ -5,6 +5,7 @@ import builtins
 import io
 import re
 import tokenize
+import warnings
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -9378,6 +9379,13 @@ def lint_source(
     active_config = config or LintConfig()
     try:
         tree = ast.parse(source, filename=path, type_comments=True)
+        # ast.parse accepts code the compiler rejects: `return` outside a
+        # function, `break` outside a loop, duplicate parameters. Compile the
+        # tree (never execute it) so those are reported as SLP000 too.
+        # Compiler warnings (for example invalid escapes) are not findings.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            compile(tree, path, "exec", dont_inherit=True)
     except SyntaxError as error:
         if "SLP000" not in active_config.enabled_codes:
             return []
