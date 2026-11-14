@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added `SLP020` (low confidence). `SLP001` placeholders that show a sign of intent (a class method that raises `NotImplementedError`, a docstring describing a subclass hook, or a nested function that is passed or returned) are reported as `SLP020` instead of `SLP001`. Existing `# noqa: SLP001` comments and baselines still apply to them, `--select SLP001` still reports them, and `--ignore SLP001` still hides them.
+- `SLP020` docstring signals (subclass, override, hook, by default, no-op) now match
+  whole words. A substring test read "webhook" as "hook" and reported a concrete
+  stub as a warning instead of an `SLP001` error, so `--fail-on error` passed it.
+  Inflected forms such as "overridden" and "hooks" now also count.
+- A nested function passed on through a conditional or boolean expression
+  (`register(cb if flag else None)`, `cb or default`) now counts as escaping.
+
 ## 2.5.0 - 2026-10-11
 
 - Expanded Python runtime and syntax compatibility to Python >=3.12, including
@@ -11,7 +21,6 @@
 - Added `SLP018` for discarded return statuses from `os.system` and
   `subprocess.call`.
 - Added `SLP019` for insecure temporary file creation via `tempfile.mktemp`.
-- Added `SLP020` (low confidence). `SLP001` placeholders that show a sign of intent (a class method that raises `NotImplementedError`, a docstring describing a subclass hook, or a nested function that is passed or returned) are reported as `SLP020` instead of `SLP001`. Existing `# noqa: SLP001` comments and baselines still apply to them, `--select SLP001` still reports them, and `--ignore SLP001` still hides them.
 - Added an executable differential corpus for Ruff, Pyright, ty, and
   pyclichecker, plus explicit source-encoding regression coverage.
 - Documented pyclichecker's place beside formatters, general linters, type
