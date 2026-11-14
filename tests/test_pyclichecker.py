@@ -7602,5 +7602,75 @@ class CompileErrorTests(unittest.TestCase):
         self.assertEqual(pyclichecker.lint_source("return 1\n", config=config), [])
 
 
+class DefinitionTimeScopeTests(unittest.TestCase):
+    def codes(self, source: str) -> list[tuple[int, str]]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(finding.line, finding.code) for finding in findings]
+
+    def test_slp019_in_class_body_default_and_lambda(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import tempfile
+
+                class C:
+                    path = tempfile.mktemp()
+
+                def f(path=tempfile.mktemp()):
+                    return path
+
+                g = lambda: tempfile.mktemp()
+                """),
+            [(5, "SLP019"), (7, "SLP019"), (10, "SLP019")],
+        )
+
+    def test_slp010_in_method_default_and_class_body(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import requests
+
+                class Client:
+                    banner = requests.get("https://x")
+
+                    def fetch(self, seed=requests.get("https://y")):
+                        return seed
+                """),
+            [(5, "SLP010"), (7, "SLP010")],
+        )
+
+    def test_corrected_and_shadowed_definition_time_calls_are_clean(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import tempfile
+
+                class C:
+                    handle = tempfile.NamedTemporaryFile()
+
+                def f(path=tempfile.mkdtemp()):
+                    return path
+
+                make = lambda tempfile: tempfile.mktemp()
+                """),
+            [],
+        )
+
+    def test_function_body_calls_are_not_reported_twice(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import tempfile
+
+                class C:
+                    def method(self):
+                        return tempfile.mktemp()
+
+                def outer():
+                    inner = lambda: tempfile.mktemp()
+                    return inner
+                """),
+            [(6, "SLP019"), (9, "SLP019")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

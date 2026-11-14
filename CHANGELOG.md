@@ -19,6 +19,8 @@
   silently and the incomplete scan reported as clean.
 - `SLP000` now reports code that parses but does not compile (`return` outside a
   function, `break` outside a loop, duplicate parameters, top-level `await`).
+- `SLP019` and `SLP010` now check class bodies, decorators, default arguments and
+  lambda bodies, which run at definition time and were skipped.
 
 ## 2.5.0 - 2026-10-11
 

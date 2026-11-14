@@ -2333,6 +2333,12 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.network_calls: list[OperationalCall] = []
         self.http_calls: list[OperationalCall] = []
         self.tempfile_mktemp_calls: list[OperationalCall] = []
+        # Depth inside code this scope's flow index does not model: class
+        # bodies and lambda bodies. Calls there are still checked by the rules
+        # that need no flow analysis (SLP010, SLP019).
+        self.detached_depth = 0
+        # Lambda parameters shadow module aliases inside the lambda body.
+        self.shadowed: list[set[str]] = []
 
     def visit_Call(self, node: ast.Call) -> None:
         aliases = _aliases_for_scope_snapshot(
@@ -2341,35 +2347,78 @@ class _OperationalCallVisitor(ast.NodeVisitor):
             self.local_names,
         )
         raw_name = _expression_name(node.func)
+        root_name = raw_name.split(".", 1)[0]
+        if any(root_name in names for names in self.shadowed):
+            self.generic_visit(node)
+            return
         qualified_name = _resolve_imported_name(raw_name, aliases)
-        if qualified_name == "subprocess.run":
-            self.subprocess_calls.append(OperationalCall(node, qualified_name, aliases))
-        if qualified_name in {"os.system", "subprocess.call"}:
-            self.command_status_calls.append(
-                OperationalCall(node, qualified_name, aliases)
-            )
+        if self.detached_depth == 0:
+            if qualified_name == "subprocess.run":
+                self.subprocess_calls.append(
+                    OperationalCall(node, qualified_name, aliases)
+                )
+            if qualified_name in {"os.system", "subprocess.call"}:
+                self.command_status_calls.append(
+                    OperationalCall(node, qualified_name, aliases)
+                )
+            if _is_http_call(qualified_name):
+                self.http_calls.append(OperationalCall(node, qualified_name, aliases))
         if qualified_name == "tempfile.mktemp":
             self.tempfile_mktemp_calls.append(
                 OperationalCall(node, qualified_name, aliases)
             )
         if _is_timeout_call(qualified_name):
             self.network_calls.append(OperationalCall(node, qualified_name, aliases))
-        if _is_http_call(qualified_name):
-            self.http_calls.append(OperationalCall(node, qualified_name, aliases))
 
         self.generic_visit(node)
 
+    def _visit_definition_time(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        # Decorators and defaults run in the enclosing scope when the
+        # definition executes; the body is its own scope, checked separately.
+        if not isinstance(node, ast.Lambda):
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        return
+        self._visit_definition_time(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        return
+        self._visit_definition_time(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        return
+        for expression in (*node.decorator_list, *node.bases, *node.keywords):
+            self.visit(expression)
+        # The class body runs once, at definition time. Methods inside it
+        # are visited for their decorators and defaults only.
+        self.detached_depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        self.detached_depth -= 1
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
+        self._visit_definition_time(node)
+        arguments = node.args
+        names = {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        }
+        names.update(
+            extra.arg for extra in (arguments.vararg, arguments.kwarg) if extra
+        )
+        self.shadowed.append(names)
+        self.detached_depth += 1
+        self.visit(node.body)
+        self.detached_depth -= 1
+        self.shadowed.pop()
 
 
 def _collect_import_aliases(body: Sequence[ast.stmt]) -> dict[str, str]:
