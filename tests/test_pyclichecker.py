@@ -7286,7 +7286,7 @@ class ReviewRegressionTests(unittest.TestCase):
             self.codes("""
                 class Base:
                     def on_save(self):
-                        \"\"\"Hooks run after save; subclasses override this.\"\"\"
+                        \"\"\"Hooks run after save.\"\"\"
                         pass
 
                     def on_load(self):
@@ -7334,7 +7334,8 @@ class ReviewRegressionTests(unittest.TestCase):
                 def keyed():
                     def on_event():
                         pass
-                    return {on_event: 1}.get
+                    table = {on_event: 1}
+                    return len(table)
 
                 def valued():
                     def on_event():
@@ -7451,7 +7452,12 @@ class CliContractTests(unittest.TestCase):
     def test_select_accepts_prefixes_and_rejects_unknown_codes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dirty = Path(directory) / "dirty.py"
-            dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            # SLP001 is inside the SLP00 prefix; SLP019 is outside it.
+            dirty.write_text(
+                "import tempfile\n\npath = tempfile.mktemp()\n\n\n"
+                "def unfinished():\n    pass\n",
+                encoding="utf-8",
+            )
             prefix = self.run_main(
                 [str(dirty), "--select", "SLP00", "--format", "json"]
             )
@@ -7464,7 +7470,10 @@ class CliContractTests(unittest.TestCase):
 
         self.assertEqual(prefix[0], 1)
         self.assertIn('"SLP001"', prefix[1])
-        self.assertEqual(other[0], 0)
+        self.assertNotIn('"SLP019"', prefix[1])
+        self.assertEqual(other[0], 1)
+        self.assertIn("SLP019", other[1])
+        self.assertNotIn("SLP001", other[1])
         self.assertEqual(raised.exception.code, 2)
 
     def test_threshold_arguments_accept_zero_and_reject_negatives(self) -> None:
