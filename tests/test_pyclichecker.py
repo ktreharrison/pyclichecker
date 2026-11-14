@@ -7917,5 +7917,44 @@ class SourceryReviewTests(unittest.TestCase):
         )
 
 
+class Issue11ExtensionPointTests(unittest.TestCase):
+    """Issue #11: the two public examples are warnings (SLP020), not errors."""
+
+    def findings(self, source: str) -> list[tuple[str, str]]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(f.code, f.severity) for f in found]
+
+    def test_httpx_content_decoder_flush(self) -> None:
+        # encode/httpx b5addb6, httpx/_decoders.py line 40.
+        self.assertEqual(
+            self.findings("""
+                class ContentDecoder:
+                    def decode(self, data: bytes) -> bytes:
+                        raise NotImplementedError()  # pragma: no cover
+
+                    def flush(self) -> bytes:
+                        raise NotImplementedError()  # pragma: no cover
+                """),
+            [("SLP020", "warning"), ("SLP020", "warning")],
+        )
+
+    def test_requests_adapter_add_headers(self) -> None:
+        # psf/requests 3c7baaa, src/requests/adapters.py line 599.
+        self.assertEqual(
+            self.findings("""
+                class HTTPAdapter:
+                    def add_headers(self, request, **kwargs):
+                        \"\"\"Add any headers needed by the connection. As of v2.0 this does
+                        nothing by default, but is left for overriding by users that subclass
+                        the :class:`HTTPAdapter <requests.adapters.HTTPAdapter>`.
+                        \"\"\"
+                        pass
+                """),
+            [("SLP020", "warning")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
