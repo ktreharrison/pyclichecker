@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- `SLP018`, `SLP009` and `SLP011` now check class bodies, which run once at
+  class definition. A status, result or response bound to a class-level name is
+  a class attribute and counts as observed. Lambda bodies stay out of these
+  flow-based rules: a lambda runs later, outside the handlers around its
+  definition (and `SLP018` cannot fire in a lambda, which has no statements).
+  An HTTP call used as a method's default argument is now reported like one in
+  a module-level default.
+
+- Class bodies resolve names like Python does: a class-level import or
+  assignment inside a class defined in a function now applies to that class body,
+  and a nested class no longer sees names bound in the class it is nested in.
+  This found missed `SLP018` findings and removed a false one.
+- A command status, subprocess result or HTTP response bound in a class body
+  and read later in that same body is checked like module-level code
+  (`SLP009`/`SLP018`/`SLP011`); only results left as class attributes count as
+  observed. Chained assignments (`a = b = subprocess.run(...)`) count as bindings.
+
 ## 2.6.0 - 2026-11-14
 
 - `SLP020` no longer treats pytest markers (`@pytest.mark.*`, also via `from pytest import mark`) as registering decorators, so a marker-decorated stub stays an `SLP001` error; `@pytest.fixture` stubs remain `SLP020`.

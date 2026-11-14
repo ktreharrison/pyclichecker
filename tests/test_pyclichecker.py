@@ -7650,7 +7650,10 @@ class DefinitionTimeScopeTests(unittest.TestCase):
                     def fetch(self, seed=requests.get("https://y")):
                         return seed
                 """),
-            [(5, "SLP010"), (7, "SLP010")],
+            # The class-level `banner` is a class attribute (observed); the
+            # method default is checked like a module-level default, which
+            # also reports SLP011.
+            [(5, "SLP010"), (7, "SLP010"), (7, "SLP011")],
         )
 
     def test_corrected_and_shadowed_definition_time_calls_are_clean(self) -> None:
@@ -8079,6 +8082,204 @@ class PytestMarkerDecoratorTests(unittest.TestCase):
                     pass
                 """),
             ["SLP020"],
+        )
+
+
+class ClassBodyOperationalTests(unittest.TestCase):
+    """SLP018, SLP009 and SLP011 run in class bodies, which execute at
+    definition time; class-level bindings are attributes, so observed."""
+
+    def codes(self, source: str) -> list[tuple[int, str]]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(f.line, f.code) for f in found]
+
+    def test_discarded_status_in_class_body_is_reported(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+                import os as o
+                from os import system
+
+                class C:
+                    os.system("a")
+                    o.system("b")
+                    system("c")
+
+                    class Inner:
+                        os.system("d")
+                """),
+            [(7, "SLP018"), (8, "SLP018"), (9, "SLP018"), (12, "SLP018")],
+        )
+
+    def test_class_level_bindings_count_as_observed(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+                import subprocess
+                import requests
+
+                class C:
+                    status = os.system("a")
+                    ok = status == 0
+                    (code := os.system("b"))
+                    result = subprocess.run(["ls"])
+                    response = requests.get("https://x", timeout=5)
+                """),
+            [],
+        )
+
+    def test_subprocess_and_http_in_class_body(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+                import requests
+
+                class C:
+                    subprocess.run(["ls"])
+                    subprocess.run(["ls"], check=True)
+                    requests.get("https://x", timeout=5).json()
+                    requests.get("https://y", timeout=5).raise_for_status()
+                """),
+            [(6, "SLP009"), (8, "SLP011")],
+        )
+
+    def test_class_level_shadowing_and_imports_resolve(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                class Shadowed:
+                    os = None
+                    os.system("a")
+
+                class Imports:
+                    import os as osmod
+                    osmod.system("b")
+
+                def factory():
+                    class Local:
+                        os.system("c")
+                    return Local
+                """),
+            [(10, "SLP018"), (14, "SLP018")],
+        )
+
+    def test_lambda_bodies_stay_out_of_flow_rules(self) -> None:
+        # Documented limit: a lambda runs later, outside the handlers that
+        # surround its definition, so the flow-based rules do not check it.
+        self.assertEqual(
+            self.codes("""
+                import os
+                import subprocess
+
+                f = lambda: os.system("a")
+                g = lambda cmd: subprocess.run(cmd).stdout
+                """),
+            [],
+        )
+
+
+class ClassScopeAliasAndBindingTests(unittest.TestCase):
+    """Sourcery review of #18: class-body aliases and bindings."""
+
+    def codes(self, source: str) -> list[str]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f"{f.code}@{f.line}" for f in found]
+
+    def test_class_level_import_inside_function_is_resolved(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def outer():
+                    class C:
+                        import os
+                        os.system("make")
+                """),
+            ["SLP018@5"],
+        )
+
+    def test_class_level_shadow_inside_function_is_respected(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                def outer():
+                    class C:
+                        os = None
+                        os.system("make")
+                """),
+            [],
+        )
+
+    def test_nested_class_does_not_see_enclosing_class_names(self) -> None:
+        # Outer's `os = None` is not visible in Inner's body, so `os` there
+        # is the module.
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                class Outer:
+                    os = None
+
+                    class Inner:
+                        os.system("make")
+                """),
+            ["SLP018@8"],
+        )
+
+    def test_nested_class_own_shadow_is_respected(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                class Outer:
+                    class Inner:
+                        os = None
+                        os.system("make")
+                """),
+            [],
+        )
+
+    def test_class_result_read_in_the_class_body_is_checked(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+
+                class C:
+                    result = subprocess.run(["make"], capture_output=True)
+                    output = result.stdout
+                """),
+            ["SLP009@5"],
+        )
+
+    def test_class_result_read_only_in_a_method_is_an_attribute(self) -> None:
+        # A method body does not see class-level names; `result` is read as
+        # an attribute by other code, so the binding counts as observed.
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+
+                class C:
+                    result = subprocess.run(["make"], capture_output=True)
+
+                    def output(self):
+                        return self.result.stdout
+                """),
+            [],
+        )
+
+    def test_chained_class_binding_counts_as_a_binding(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+
+                class C:
+                    first = second = subprocess.run(["make"], capture_output=True)
+                """),
+            [],
         )
 
 
