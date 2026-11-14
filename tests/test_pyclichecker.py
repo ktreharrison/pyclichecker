@@ -7747,5 +7747,41 @@ class CharacterColumnTests(unittest.TestCase):
         )
 
 
+class LoopIterableOracleTests(unittest.TestCase):
+    def codes(self, source: str) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source),
+            path="tests/test_app.py",
+            config=pyclichecker.LintConfig(),
+        )
+        return [finding.code for finding in findings if finding.code == "SLP014"]
+
+    def test_oracle_in_loop_iterable_counts(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import pytest
+
+                def test_fails():
+                    for _ in [pytest.fail("x")]:
+                        pass
+
+                async def test_async(stream):
+                    async for _ in stream(pytest.fail("y")):
+                        pass
+                """),
+            [],
+        )
+
+    def test_loop_without_any_oracle_is_still_reported(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def test_nothing(items):
+                    for item in items:
+                        print(item)
+                """),
+            ["SLP014"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

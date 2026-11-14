@@ -1631,6 +1631,10 @@ class _TestOracleVisitor(ast.NodeVisitor):
                 return
 
     def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
+        # The iterable is always evaluated, even when the loop body never runs.
+        self.visit(node.iter)
+        if self.found:
+            return
         empty = _literal_iterable_is_empty(node.iter, self.aliases)
         branches = (node.orelse,) if empty is True else (node.body, node.orelse)
         for branch in branches:

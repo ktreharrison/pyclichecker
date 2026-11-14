@@ -25,6 +25,8 @@
   `(status := os.system(...))`; both were treated as observed without a read.
 - Diagnostic columns count characters, not UTF-8 bytes; a non-ASCII character
   earlier on the line moved the reported column right. Fingerprints are unchanged.
+- `SLP014` counts a test oracle evaluated in a loop's iterable
+  (`for _ in [pytest.fail(...)]`), which runs even when the body does not.
 
 ## 2.5.0 - 2026-10-11
 
