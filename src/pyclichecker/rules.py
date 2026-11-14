@@ -7477,8 +7477,10 @@ class SlopVisitor(ast.NodeVisitor):
         module_body: Sequence[ast.stmt],
         module_aliases: dict[str, str],
         header_suppression_lines: dict[int, set[int]],
+        source_lines: Sequence[str] = (),
     ) -> None:
         self.path = path
+        self.source_lines = source_lines
         self.comments = comments
         self.config = config
         self.module_body = tuple(module_body)
@@ -7537,9 +7539,7 @@ class SlopVisitor(ast.NodeVisitor):
             return
 
         finding_line = line if line is not None else getattr(node, "lineno", 1)
-        finding_column = (
-            column if column is not None else getattr(node, "col_offset", 0) + 1
-        )
+        finding_column = column if column is not None else self._node_column(node)
         suppression_lines = {finding_line}
         suppression_lines.update(self.header_suppression_lines.get(id(node), ()))
         containing_statement = _containing_statement(node)
@@ -7593,9 +7593,23 @@ class SlopVisitor(ast.NodeVisitor):
         return RelatedLocation(
             path=self.path,
             line=getattr(node, "lineno", 1),
-            column=getattr(node, "col_offset", 0) + 1,
+            column=self._node_column(node),
             message=message,
         )
+
+    def _node_column(self, node: ast.AST) -> int:
+        """1-based character column of ``node``.
+
+        ``col_offset`` counts UTF-8 bytes, so any non-ASCII character earlier
+        on the line pushed reported columns to the right.
+        """
+
+        offset = getattr(node, "col_offset", 0)
+        line_number = getattr(node, "lineno", 0)
+        if 1 <= line_number <= len(self.source_lines):
+            prefix = self.source_lines[line_number - 1].encode("utf-8")[:offset]
+            return len(prefix.decode("utf-8", errors="replace")) + 1
+        return offset + 1
 
     def _is_suppressed(self, line: int, code: str) -> bool:
         for comment in self.comments_by_line.get(line, ()):
@@ -9510,6 +9524,9 @@ def lint_source(
         module_body=tree.body,
         module_aliases=module_aliases,
         header_suppression_lines=_collect_header_suppression_lines(source, tree),
+        # Universal newlines only, matching AST line numbers; str.splitlines
+        # also breaks on form feeds and Unicode separators.
+        source_lines=io.StringIO(source, newline=None).readlines(),
     )
     visitor.visit(tree)
     visitor.finalize()

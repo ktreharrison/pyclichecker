@@ -23,6 +23,8 @@
   lambda bodies, which run at definition time and were skipped.
 - `SLP018` now follows every name in `a = b = os.system(...)` and a bare
   `(status := os.system(...))`; both were treated as observed without a read.
+- Diagnostic columns count characters, not UTF-8 bytes; a non-ASCII character
+  earlier on the line moved the reported column right. Fingerprints are unchanged.
 
 ## 2.5.0 - 2026-10-11
 
