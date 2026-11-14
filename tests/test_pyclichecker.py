@@ -7956,5 +7956,91 @@ class Issue11ExtensionPointTests(unittest.TestCase):
         )
 
 
+class Issue12AsyncCallbackTests(unittest.TestCase):
+    """Issue #12: SLP004 and async signatures that a caller requires."""
+
+    def slp004(self, source: str) -> list[str]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f.message.split("`")[1] for f in found if f.code == "SLP004"]
+
+    def test_escaping_nested_async_hooks_are_not_reported(self) -> None:
+        # httpx b5addb6 tests/client/test_event_hooks.py line 185 shape.
+        self.assertEqual(
+            self.slp004("""
+                async def test_hooks(make_client):
+                    async def on_request(request):
+                        seen.append(request)
+
+                    async def on_response(response):
+                        seen.append(response)
+
+                    client = make_client(event_hooks={"request": [on_request],
+                                                      "response": [on_response]})
+                    await client.get("/")
+
+                def factory():
+                    async def handler(request):
+                        return request
+                    return handler
+                """),
+            [],
+        )
+
+    def test_nested_async_that_does_not_escape_is_still_reported(self) -> None:
+        self.assertEqual(
+            self.slp004("""
+                async def outer():
+                    async def helper():
+                        return 1
+                    if helper:
+                        await outer()
+                """),
+            ["outer.helper"],
+        )
+
+    def test_module_level_async_without_await_is_still_reported(self) -> None:
+        # A hook registered from another file cannot be seen here.
+        self.assertEqual(
+            self.slp004("""
+                async def on_startup():
+                    return None
+                """),
+            ["on_startup"],
+        )
+
+    def test_registering_decorator_imposes_async_but_pytest_marker_does_not(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.slp004("""
+                import pytest
+
+                @app.on_event("startup")
+                async def warm_cache():
+                    cache.clear()
+
+                @pytest.mark.anyio
+                async def test_sync_body():
+                    assert 1 + 1 == 2
+                """),
+            ["test_sync_body"],
+        )
+
+    def test_async_comprehension_is_async_behavior(self) -> None:
+        # httpx b5addb6 tests/models/test_responses.py line 481 shape.
+        self.assertEqual(
+            self.slp004("""
+                async def collect(stream):
+                    return [part async for part in stream]
+
+                async def collect_nested(streams):
+                    return [[p async for p in s] for s in streams]
+                """),
+            [],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
