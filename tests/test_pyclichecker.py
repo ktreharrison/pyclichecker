@@ -7650,7 +7650,10 @@ class DefinitionTimeScopeTests(unittest.TestCase):
                     def fetch(self, seed=requests.get("https://y")):
                         return seed
                 """),
-            [(5, "SLP010"), (7, "SLP010")],
+            # The class-level `banner` is a class attribute (observed); the
+            # method default is checked like a module-level default, which
+            # also reports SLP011.
+            [(5, "SLP010"), (7, "SLP010"), (7, "SLP011")],
         )
 
     def test_corrected_and_shadowed_definition_time_calls_are_clean(self) -> None:
@@ -8079,6 +8082,102 @@ class PytestMarkerDecoratorTests(unittest.TestCase):
                     pass
                 """),
             ["SLP020"],
+        )
+
+
+class ClassBodyOperationalTests(unittest.TestCase):
+    """SLP018, SLP009 and SLP011 run in class bodies, which execute at
+    definition time; class-level bindings are attributes, so observed."""
+
+    def codes(self, source: str) -> list[tuple[int, str]]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(f.line, f.code) for f in found]
+
+    def test_discarded_status_in_class_body_is_reported(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+                import os as o
+                from os import system
+
+                class C:
+                    os.system("a")
+                    o.system("b")
+                    system("c")
+
+                    class Inner:
+                        os.system("d")
+                """),
+            [(7, "SLP018"), (8, "SLP018"), (9, "SLP018"), (12, "SLP018")],
+        )
+
+    def test_class_level_bindings_count_as_observed(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+                import subprocess
+                import requests
+
+                class C:
+                    status = os.system("a")
+                    ok = status == 0
+                    (code := os.system("b"))
+                    result = subprocess.run(["ls"])
+                    response = requests.get("https://x", timeout=5)
+                """),
+            [],
+        )
+
+    def test_subprocess_and_http_in_class_body(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+                import requests
+
+                class C:
+                    subprocess.run(["ls"])
+                    subprocess.run(["ls"], check=True)
+                    requests.get("https://x", timeout=5).json()
+                    requests.get("https://y", timeout=5).raise_for_status()
+                """),
+            [(6, "SLP009"), (8, "SLP011")],
+        )
+
+    def test_class_level_shadowing_and_imports_resolve(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                class Shadowed:
+                    os = None
+                    os.system("a")
+
+                class Imports:
+                    import os as osmod
+                    osmod.system("b")
+
+                def factory():
+                    class Local:
+                        os.system("c")
+                    return Local
+                """),
+            [(10, "SLP018"), (14, "SLP018")],
+        )
+
+    def test_lambda_bodies_stay_out_of_flow_rules(self) -> None:
+        # Documented limit: a lambda runs later, outside the handlers that
+        # surround its definition, so the flow-based rules do not check it.
+        self.assertEqual(
+            self.codes("""
+                import os
+                import subprocess
+
+                f = lambda: os.system("a")
+                g = lambda cmd: subprocess.run(cmd).stdout
+                """),
+            [],
         )
 
 
