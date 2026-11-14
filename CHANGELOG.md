@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- README: a Test code section on `SLP009` volume in tests and the existing
+  `--exclude`, `--ignore` and `--baseline` options (#13). Rule severity is
+  unchanged.
 - `SLP004` no longer reports a nested `async def` that is passed, returned or
   stored, or a function registered through a decorator: the caller requires the
   async signature (#12). pytest markers do not count. Async comprehensions now

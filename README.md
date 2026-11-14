@@ -178,6 +178,30 @@ the parser message and offending source line. Moving unchanged code within a
 file therefore does not make an existing finding new. Duplicate fingerprints
 are counted, so adding another copy of an existing defect is still reported.
 
+## Test code
+
+Rules apply to test code with the same severity as application code. That is
+deliberate: a test that reads `result.stdout` without checking `returncode`
+(`SLP009`) can pass while the command it tests fails. It can also dominate a
+report. On typer 00381d6, 292 of 409 findings are `SLP009` under `tests/`.
+
+Choose a policy per repository:
+
+- Keep everything. Use a baseline (above) so only new findings fail the build.
+- Check application code strictly and relax only the noisy rule in tests,
+  with two runs:
+
+  ```bash
+  pyclichecker . --exclude 'tests/*'
+  pyclichecker tests --ignore SLP009
+  ```
+
+- Leave tests out entirely: `pyclichecker . --exclude 'tests/*'`.
+
+`--exclude` matches a glob against each path relative to the scanned root and
+against the file name, and may be repeated. `--exclude tests` also excludes a
+directory named `tests`.
+
 ## Review coverage and performance
 
 `pyclichecker` complements, rather than replaces, general-purpose quality
