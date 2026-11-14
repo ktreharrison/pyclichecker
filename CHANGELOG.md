@@ -9,6 +9,12 @@
   Inflected forms such as "overridden" and "hooks" now also count.
 - A nested function passed on through a conditional or boolean expression
   (`register(cb if flag else None)`, `cb or default`) now counts as escaping.
+- A file too deeply nested to analyze (`RecursionError`, `MemoryError`) is now
+  reported as an operational error (exit 2) instead of crashing with exit 1, and
+  the other files' findings are still reported.
+- `--ignore` with only separators (for example `","`) no longer ignores every rule.
+- `SLP010` no longer reports a missing timeout when the call passes `**options`
+  that may carry it; a `**{...}` dict literal is still checked.
 
 ## 2.5.0 - 2026-10-11
 

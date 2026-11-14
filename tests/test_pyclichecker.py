@@ -7478,5 +7478,66 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
 
 
+class OperationalErrorTests(unittest.TestCase):
+    """Exit-code contract for inputs that exhaust the analyzer."""
+
+    run_main = CliTests.run_main
+
+    def test_deeply_nested_file_is_an_operational_error_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deep = root / "deep.py"
+            deep.write_text("x = " + "+".join(["1"] * 5000) + "\n", encoding="utf-8")
+            stub = root / "stub.py"
+            stub.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            exit_code, output, error = self.run_main(
+                [str(deep), str(stub), "--format", "json"]
+            )
+
+        self.assertEqual(exit_code, 2)
+        payload = json.loads(output)
+        self.assertEqual(
+            [finding["code"] for finding in payload["findings"]], ["SLP001"]
+        )
+        self.assertTrue(
+            any("too deeply nested" in item for item in payload["errors"]), payload
+        )
+
+    def test_ignore_that_parses_to_nothing_ignores_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub = Path(directory) / "stub.py"
+            stub.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            results = [
+                self.run_main([str(stub), "--ignore", value])
+                for value in (",", " ", "")
+            ]
+
+        self.assertEqual([result[0] for result in results], [1, 1, 1])
+
+
+class TimeoutKeywordExpansionTests(unittest.TestCase):
+    def codes(self, call: str) -> list[str]:
+        source = f"import requests\nopts = {{'timeout': 5}}\nr = {call}\nr.raise_for_status()\n"
+        findings = pyclichecker.lint_source(
+            source, path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings if finding.code == "SLP010"]
+
+    def test_unknown_mapping_expansion_is_not_reported(self) -> None:
+        self.assertEqual(self.codes('requests.get("https://x", **opts)'), [])
+
+    def test_dict_literal_expansion_is_checked(self) -> None:
+        self.assertEqual(self.codes('requests.get("https://x", **{"timeout": 5})'), [])
+        self.assertEqual(
+            self.codes('requests.get("https://x", **{"verify": True})'), ["SLP010"]
+        )
+        self.assertEqual(
+            self.codes('requests.get("https://x", **{"timeout": None})'), ["SLP010"]
+        )
+
+    def test_plain_missing_timeout_is_still_reported(self) -> None:
+        self.assertEqual(self.codes('requests.get("https://x")'), ["SLP010"])
+
+
 if __name__ == "__main__":
     unittest.main()
