@@ -2342,6 +2342,24 @@ class _NamedAttributeVisitor(ast.NodeVisitor):
         return
 
 
+def _drop_class_attribute_bindings(visitor: "_OperationalCallVisitor") -> None:
+    """Treat class-level bindings as observed: they are class attributes."""
+
+    visitor.command_status_calls = [
+        call
+        for call in visitor.command_status_calls
+        if _call_result_name(call.node) is None
+    ]
+    visitor.subprocess_calls = [
+        call
+        for call in visitor.subprocess_calls
+        if _call_result_name(call.node) is None
+    ]
+    visitor.http_calls = [
+        call for call in visitor.http_calls if _call_result_name(call.node) is None
+    ]
+
+
 class _OperationalCallVisitor(ast.NodeVisitor):
     def __init__(
         self,
@@ -9321,22 +9339,39 @@ class SlopVisitor(ast.NodeVisitor):
         for statement in body:
             visitor.visit(statement)
         if class_scope:
-            # Class-level bindings are attributes; treat them as observed.
-            visitor.command_status_calls = [
-                call
-                for call in visitor.command_status_calls
-                if _call_result_name(call.node) is None
-            ]
-            visitor.subprocess_calls = [
-                call
-                for call in visitor.subprocess_calls
-                if _call_result_name(call.node) is None
-            ]
-            visitor.http_calls = [
-                call
-                for call in visitor.http_calls
-                if _call_result_name(call.node) is None
-            ]
+            _drop_class_attribute_bindings(visitor)
+        self._report_flow_rules(visitor, body)
+        self._check_tempfile_calls(visitor.tempfile_mktemp_calls)
+
+        for call in visitor.network_calls:
+            if _call_has_timeout(call.node, call.qualified_name):
+                continue
+            self.add_finding(
+                call.node,
+                "SLP010",
+                f"`{call.qualified_name}` omits a timeout or sets it to None; "
+                "pass `timeout=...`",
+                evidence=(
+                    f"resolved call is `{call.qualified_name}`",
+                    "no non-None timeout argument was found",
+                ),
+            )
+
+        for class_def in visitor.class_defs:
+            self._check_operational_scope(
+                class_def.body,
+                aliases,
+                local_names=local_names,
+                class_scope=True,
+            )
+
+    def _report_flow_rules(
+        self,
+        visitor: _OperationalCallVisitor,
+        body: Sequence[ast.stmt],
+    ) -> None:
+        """Report SLP009, SLP018 and SLP011, which need the scope's flow index."""
+
         flow_indexes: dict[tuple[tuple[str, str], ...], _OperationalFlowIndex] = {}
 
         def flow_index_for(call: OperationalCall) -> _OperationalFlowIndex:
@@ -9369,22 +9404,6 @@ class SlopVisitor(ast.NodeVisitor):
                 ),
             )
 
-        self._check_tempfile_calls(visitor.tempfile_mktemp_calls)
-
-        for call in visitor.network_calls:
-            if _call_has_timeout(call.node, call.qualified_name):
-                continue
-            self.add_finding(
-                call.node,
-                "SLP010",
-                f"`{call.qualified_name}` omits a timeout or sets it to None; "
-                "pass `timeout=...`",
-                evidence=(
-                    f"resolved call is `{call.qualified_name}`",
-                    "no non-None timeout argument was found",
-                ),
-            )
-
         for call in visitor.http_calls:
             if _http_result_is_handled(call, flow_index_for(call)):
                 continue
@@ -9398,14 +9417,6 @@ class SlopVisitor(ast.NodeVisitor):
                     f"resolved call is `{call.qualified_name}`",
                     "no HTTP success check covers every result-consuming path",
                 ),
-            )
-
-        for class_def in visitor.class_defs:
-            self._check_operational_scope(
-                class_def.body,
-                aliases,
-                local_names=local_names,
-                class_scope=True,
             )
 
     def _find_duplicate_implementations(self) -> None:
