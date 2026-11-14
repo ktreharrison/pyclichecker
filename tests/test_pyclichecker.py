@@ -7258,5 +7258,225 @@ class CliTests(unittest.TestCase):
         )
 
 
+class ReviewRegressionTests(unittest.TestCase):
+    """Defects and untested branches found in the 14 Nov 2026 review."""
+
+    def codes(self, source: str) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings]
+
+    def test_extension_point_words_match_whole_words_only(self) -> None:
+        # "webhook" contains "hook"; a substring test moved this concrete stub
+        # from SLP001 (error) to SLP020 (warning), so --fail-on error passed.
+        self.assertEqual(
+            self.codes("""
+                class Notifier:
+                    def send_webhook(self):
+                        \"\"\"Post the payload to the customer webhook.\"\"\"
+                        pass
+                """),
+            ["SLP001"],
+        )
+
+    def test_extension_point_words_still_signal_as_words(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                class Base:
+                    def on_save(self):
+                        \"\"\"Hooks run after save; subclasses override this.\"\"\"
+                        pass
+
+                    def on_load(self):
+                        \"\"\"Overridden in plugins.\"\"\"
+                        pass
+                """),
+            ["SLP020", "SLP020"],
+        )
+
+    def test_nested_callback_passed_through_conditional_or_boolean_escapes(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.codes("""
+                def conditional(register, flag):
+                    def on_event():
+                        pass
+                    register(on_event if flag else None)
+
+                def boolean(register, default):
+                    def on_event():
+                        pass
+                    handler = on_event or default
+                    register(handler)
+                """),
+            ["SLP020", "SLP020"],
+        )
+
+    def test_nested_callback_in_conditional_test_does_not_escape(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def outer(register, a, b):
+                    def on_event():
+                        pass
+                    register(a if on_event else b)
+                """),
+            ["SLP001"],
+        )
+
+    def test_nested_callback_as_dict_key_does_not_escape_but_value_does(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.codes("""
+                def keyed():
+                    def on_event():
+                        pass
+                    return {on_event: 1}.get
+
+                def valued():
+                    def on_event():
+                        pass
+                    return {"event": on_event}
+                """),
+            ["SLP001", "SLP020"],
+        )
+
+    def test_reference_before_nested_definition_is_not_an_escape(self) -> None:
+        # The earlier `register(on_event)` passes the parameter, not the stub.
+        self.assertEqual(
+            self.codes("""
+                def outer(register, on_event):
+                    register(on_event)
+                    def on_event():
+                        pass
+                """),
+            ["SLP001"],
+        )
+
+    def test_later_function_or_class_rebinding_stops_the_search(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def by_function(register):
+                    def on_event():
+                        pass
+                    def on_event():
+                        return 1
+                    register(on_event)
+
+                def by_class(register):
+                    def on_event():
+                        pass
+                    class on_event:
+                        value = 1
+                    register(on_event)
+                """),
+            ["SLP001", "SLP001"],
+        )
+
+    def test_scanner_handles_lambdas_and_keyword_only_parameters(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def lambda_sibling(register):
+                    def on_event():
+                        pass
+                    later = lambda: 0
+                    register(later)
+
+                def keyword_default(register):
+                    def on_event():
+                        pass
+                    def wrapper(*, required, callback=on_event):
+                        return callback
+                    register(wrapper)
+                """),
+            ["SLP001", "SLP020"],
+        )
+
+
+class CliContractTests(unittest.TestCase):
+    """CLI behaviour AGENTS.md promises but no test pinned down."""
+
+    run_main = CliTests.run_main
+
+    def test_exit_code_values_are_part_of_the_contract(self) -> None:
+        self.assertEqual(
+            (
+                pyclichecker.EXIT_CLEAN,
+                pyclichecker.EXIT_FINDINGS,
+                pyclichecker.EXIT_OPERATIONAL_ERROR,
+            ),
+            (0, 1, 2),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dirty = Path(directory) / "dirty.py"
+            dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            self.assertEqual(self.run_main([str(dirty)])[0], 1)
+            self.assertEqual(self.run_main([str(Path(directory) / "missing.py")])[0], 2)
+
+    def test_github_format_escapes_properties_and_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "a,b:c"
+            folder.mkdir()
+            dirty = folder / "m.py"
+            dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            exit_code, output, _ = self.run_main([str(dirty), "--format", "github"])
+            missing_code, missing_output, _ = self.run_main(
+                [str(folder / "missing.py"), "--format", "github"]
+            )
+
+        self.assertEqual(exit_code, 1)
+        (line,) = output.splitlines()
+        self.assertTrue(line.startswith("::error file="), line)
+        self.assertIn("a%2Cb%3Ac", line)
+        self.assertNotIn("a,b:c", line)
+        self.assertTrue(
+            line.endswith(
+                ",line=1,col=1::SLP001 `unfinished` is a concrete placeholder implementation"
+            ),
+            line,
+        )
+        self.assertEqual(missing_code, 2)
+        self.assertTrue(
+            missing_output.startswith("::error title=pyclichecker::"), missing_output
+        )
+
+    def test_select_accepts_prefixes_and_rejects_unknown_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dirty = Path(directory) / "dirty.py"
+            dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            prefix = self.run_main(
+                [str(dirty), "--select", "SLP00", "--format", "json"]
+            )
+            other = self.run_main([str(dirty), "--select", "SLP019"])
+            with (
+                self.assertRaises(SystemExit) as raised,
+                redirect_stderr(io.StringIO()),
+            ):
+                pyclichecker.main([str(dirty), "--select", "SLPX"])
+
+        self.assertEqual(prefix[0], 1)
+        self.assertIn('"SLP001"', prefix[1])
+        self.assertEqual(other[0], 0)
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_threshold_arguments_accept_zero_and_reject_negatives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            clean = Path(directory) / "clean.py"
+            clean.write_text(
+                "def identity(value):\n    return value\n", encoding="utf-8"
+            )
+            accepted = self.run_main([str(clean), "--max-function-lines", "0"])
+            with (
+                self.assertRaises(SystemExit) as raised,
+                redirect_stderr(io.StringIO()),
+            ):
+                pyclichecker.main([str(clean), "--max-function-lines", "-1"])
+
+        self.assertEqual(accepted[0], 0)
+        self.assertEqual(raised.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
