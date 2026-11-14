@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.7.0 - 2026-11-15
 
 - `SLP018`, `SLP009` and `SLP011` now check class bodies, which run once at
   class definition. A status, result or response bound to a class-level name is
