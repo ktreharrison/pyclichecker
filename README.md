@@ -137,6 +137,22 @@ Thresholds for function size, comment clusters, and duplicate bodies are
 exposed as command-line options. Run `pyclichecker --help` for their names and
 defaults.
 
+### What `SLP004` can and cannot see
+
+`SLP004` does not report an `async def` whose signature a caller imposes:
+
+- a nested `async def` that its enclosing function passes, returns or stores,
+  such as an event hook given to `AsyncClient(event_hooks=...)` or an ASGI
+  `send` callable;
+- a function registered through a decorator, such as `@app.on_event(...)`.
+  pytest markers such as `@pytest.mark.anyio` do not count: a marked test with
+  no awaits is still reported.
+
+A module-level async hook registered from another file cannot be detected from
+one file's syntax tree, so it is still reported. Suppress it with
+`# noqa: SLP004` and a reason. Async comprehensions
+(`[x async for x in stream]`) count as async behavior.
+
 For a first pass, fix `error` findings before reviewing `warning` findings.
 Warnings are prompts for engineering judgment, not proof that the code is
 wrong.

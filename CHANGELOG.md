@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `SLP004` no longer reports a nested `async def` that is passed, returned or
+  stored, or a function registered through a decorator: the caller requires the
+  async signature (#12). pytest markers do not count. Async comprehensions now
+  count as async behavior; they were false positives. On httpx b5addb6, SLP004
+  went from 40 to 10.
 - Added `SLP020` (low confidence). `SLP001` placeholders that show a sign of intent (a class method that raises `NotImplementedError`, a docstring describing a subclass hook, or a nested function that is passed or returned) are reported as `SLP020` instead of `SLP001`. Existing `# noqa: SLP001` comments and baselines still apply to them, `--select SLP001` still reports them, and `--ignore SLP001` still hides them.
 - `SLP020` docstring signals (subclass, override, hook, by default, no-op) now match
   whole words. A substring test read "webhook" as "hook" and reported a concrete

@@ -500,6 +500,12 @@ class _AsyncBehaviorVisitor(ast.NodeVisitor):
     def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
         self.found = True
 
+    def visit_comprehension(self, node: ast.comprehension) -> None:
+        # `[x async for x in stream]` iterates asynchronously.
+        if node.is_async:
+            self.found = True
+        self.generic_visit(node)
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
 
@@ -8796,6 +8802,35 @@ class SlopVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node, is_async=True)
 
+    def _async_signature_is_imposed(self, record: FunctionRecord) -> bool:
+        """Return True when a caller, not the body, requires the function be async.
+
+        A nested ``async def`` that the enclosing function passes, returns or
+        stores, and a function registered through a decorator, are callbacks:
+        the API that receives them awaits them, so ``async`` is part of the
+        contract even when the body never awaits. A module-level hook
+        registered from another file cannot be seen from one file's AST and is
+        still reported.
+        """
+
+        aliases = self.alias_stack[-1]
+        for decorator in record.node.decorator_list:
+            # pytest markers (``@pytest.mark.anyio``) annotate a test; they do
+            # not hand the function to an API that awaits it.
+            name = _resolve_imported_name(
+                _expression_name(_decorator_expression(decorator)), aliases
+            )
+            if name.startswith("pytest.mark."):
+                continue
+            if _is_registering_decorator(decorator, aliases):
+                return True
+        enclosing = self.kind_stack[-1] if self.kind_stack else ""
+        return (
+            enclosing == "function"
+            and bool(self.function_stack)
+            and _nested_function_escapes(self.function_stack[-1], record.node)
+        )
+
     def _extension_point_reason(self, record: FunctionRecord) -> str | None:
         """Return why a placeholder may be intentional, or None when it is not."""
 
@@ -8865,6 +8900,7 @@ class SlopVisitor(ast.NodeVisitor):
             and not placeholder
             and not record.exempt
             and not _contains_async_behavior(record.effective_body)
+            and not self._async_signature_is_imposed(record)
         ):
             self.add_finding(
                 record.node,
