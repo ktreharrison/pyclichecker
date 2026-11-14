@@ -8042,5 +8042,45 @@ class Issue12AsyncCallbackTests(unittest.TestCase):
         )
 
 
+class PytestMarkerDecoratorTests(unittest.TestCase):
+    """pytest markers register nothing, for SLP020 as for SLP004."""
+
+    def codes(self, source: str) -> list[str]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f.code for f in found]
+
+    def test_marker_decorated_stub_stays_slp001(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import pytest
+                from pytest import mark
+
+                @pytest.mark.slow
+                def helper_one():
+                    pass
+
+                @mark.parametrize("x", [1])
+                def helper_two(x):
+                    pass
+                """),
+            ["SLP001", "SLP001"],
+        )
+
+    def test_fixture_stub_is_still_an_extension_point(self) -> None:
+        # A fixture is registered by name, so SLP020 (not SLP001) is right.
+        self.assertEqual(
+            self.codes("""
+                import pytest
+
+                @pytest.fixture
+                def resource():
+                    pass
+                """),
+            ["SLP020"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
