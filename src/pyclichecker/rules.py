@@ -307,7 +307,11 @@ def _effective_body(body: Sequence[ast.stmt]) -> tuple[ast.stmt, ...]:
     return result
 
 
-_EXTENSION_POINT_WORDS = ("subclass", "override", "by default", "no-op", "hook")
+# Whole words only: a substring test let "webhook" read as "hook" and moved
+# concrete stubs from SLP001 (error) to SLP020 (warning).
+_EXTENSION_POINT_PATTERN = re.compile(
+    r"\b(?:subclass(?:es|ed|ing)?|overrid(?:e|es|den|ing)|by default|no-op|hooks?)\b"
+)
 _NON_REGISTERING_MODULES = frozenset(
     {
         "abc",
@@ -409,6 +413,19 @@ class _EscapeScanner:
             return
         if isinstance(node, ast.Name) and node.id == self.name and self.started:
             self.visit_name(node, parent)
+            return
+        # A conditional or boolean expression yields one of its operands, so
+        # `register(cb if flag else other)` and `cb or default` pass `cb` on.
+        # Judge those operands by the expression's own parent. The IfExp test
+        # is only read for truth, so it keeps the IfExp as its parent.
+        if isinstance(node, ast.IfExp):
+            self.visit(node.test, node)
+            self.visit(node.body, parent)
+            self.visit(node.orelse, parent)
+            return
+        if isinstance(node, ast.BoolOp):
+            for value in node.values:
+                self.visit(value, parent)
             return
         for child in ast.iter_child_nodes(node):
             self.visit(child, node)
@@ -8606,7 +8623,7 @@ class SlopVisitor(ast.NodeVisitor):
             if isinstance(statement, ast.Raise):
                 return "a class method raises NotImplementedError without abc.abstractmethod"
             docstring = (ast.get_docstring(record.node) or "").lower()
-            if any(word in docstring for word in _EXTENSION_POINT_WORDS):
+            if _EXTENSION_POINT_PATTERN.search(docstring):
                 return "its docstring describes a subclass hook or default"
             return None
         if enclosing == "function" and self.function_stack:
