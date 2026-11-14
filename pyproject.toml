@@ -1,6 +1,6 @@
 [project]
 name = "pyclichecker"
-version = "2.6.0"
+version = "2.7.0"
 description = "A high-signal Python linter for behavioral defects and maintainability risks"
 readme = "README.md"
 requires-python = ">=3.12"
