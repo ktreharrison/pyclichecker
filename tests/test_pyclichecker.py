@@ -8181,5 +8181,107 @@ class ClassBodyOperationalTests(unittest.TestCase):
         )
 
 
+class ClassScopeAliasAndBindingTests(unittest.TestCase):
+    """Sourcery review of #18: class-body aliases and bindings."""
+
+    def codes(self, source: str) -> list[str]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f"{f.code}@{f.line}" for f in found]
+
+    def test_class_level_import_inside_function_is_resolved(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def outer():
+                    class C:
+                        import os
+                        os.system("make")
+                """),
+            ["SLP018@5"],
+        )
+
+    def test_class_level_shadow_inside_function_is_respected(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                def outer():
+                    class C:
+                        os = None
+                        os.system("make")
+                """),
+            [],
+        )
+
+    def test_nested_class_does_not_see_enclosing_class_names(self) -> None:
+        # Outer's `os = None` is not visible in Inner's body, so `os` there
+        # is the module.
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                class Outer:
+                    os = None
+
+                    class Inner:
+                        os.system("make")
+                """),
+            ["SLP018@8"],
+        )
+
+    def test_nested_class_own_shadow_is_respected(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import os
+
+                class Outer:
+                    class Inner:
+                        os = None
+                        os.system("make")
+                """),
+            [],
+        )
+
+    def test_class_result_read_in_the_class_body_is_checked(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+
+                class C:
+                    result = subprocess.run(["make"], capture_output=True)
+                    output = result.stdout
+                """),
+            ["SLP009@5"],
+        )
+
+    def test_class_result_read_only_in_a_method_is_an_attribute(self) -> None:
+        # A method body does not see class-level names; `result` is read as
+        # an attribute by other code, so the binding counts as observed.
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+
+                class C:
+                    result = subprocess.run(["make"], capture_output=True)
+
+                    def output(self):
+                        return self.result.stdout
+                """),
+            [],
+        )
+
+    def test_chained_class_binding_counts_as_a_binding(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import subprocess
+
+                class C:
+                    first = second = subprocess.run(["make"], capture_output=True)
+                """),
+            [],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
