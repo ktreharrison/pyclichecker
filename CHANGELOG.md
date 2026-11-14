@@ -21,6 +21,8 @@
   function, `break` outside a loop, duplicate parameters, top-level `await`).
 - `SLP019` and `SLP010` now check class bodies, decorators, default arguments and
   lambda bodies, which run at definition time and were skipped.
+- `SLP018` now follows every name in `a = b = os.system(...)` and a bare
+  `(status := os.system(...))`; both were treated as observed without a read.
 
 ## 2.5.0 - 2026-10-11
 
