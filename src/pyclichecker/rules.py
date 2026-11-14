@@ -2342,6 +2342,85 @@ class _NamedAttributeVisitor(ast.NodeVisitor):
         return
 
 
+def _call_result_names(node: ast.Call) -> list[str]:
+    """Every name a call's result is bound to, including chained targets."""
+
+    current: ast.AST = node
+    parent = _parent_node(current)
+    while isinstance(parent, ast.Await):
+        current = parent
+        parent = _parent_node(current)
+    if isinstance(parent, ast.Assign | ast.AnnAssign | ast.NamedExpr):
+        if parent.value is current:
+            targets = (
+                parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            )
+            return [name for target in targets for name in _assigned_names(target)]
+    if isinstance(parent, ast.withitem) and parent.context_expr is current:
+        return _assigned_names(parent.optional_vars) if parent.optional_vars else []
+    return []
+
+
+def _class_body_reads(statements: Sequence[ast.stmt], names: set[str]) -> bool:
+    """True when ``statements`` read one of ``names`` in the class body itself.
+
+    Nested function, lambda and class bodies do not see class-level names, so
+    reads there do not count; their decorators, defaults and bases do.
+    """
+
+    stack: list[ast.AST] = list(statements)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Name) and node.id in names:
+            if isinstance(node.ctx, ast.Load):
+                return True
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            stack.extend(node.decorator_list)
+            stack.extend(d for d in (*node.args.defaults, *node.args.kw_defaults) if d)
+            continue
+        if isinstance(node, ast.Lambda):
+            stack.extend(d for d in (*node.args.defaults, *node.args.kw_defaults) if d)
+            continue
+        if isinstance(node, ast.ClassDef):
+            stack.extend((*node.decorator_list, *node.bases, *node.keywords))
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _drop_class_attribute_bindings(
+    visitor: "_OperationalCallVisitor", body: Sequence[ast.stmt]
+) -> None:
+    """Treat class-level bindings as observed: they become class attributes.
+
+    A result the class body itself reads later stays with the flow rules, as
+    the same code would at module level. All targets of a chained assignment
+    count as bindings.
+    """
+
+    def observed(call: OperationalCall) -> bool:
+        names = set(_call_result_names(call.node))
+        if not names:
+            return False
+        statement_index = next(
+            (
+                index
+                for index, statement in enumerate(body)
+                if any(child is call.node for child in ast.walk(statement))
+            ),
+            len(body),
+        )
+        return not _class_body_reads(body[statement_index + 1 :], names)
+
+    visitor.command_status_calls = [
+        call for call in visitor.command_status_calls if not observed(call)
+    ]
+    visitor.subprocess_calls = [
+        call for call in visitor.subprocess_calls if not observed(call)
+    ]
+    visitor.http_calls = [call for call in visitor.http_calls if not observed(call)]
+
+
 class _OperationalCallVisitor(ast.NodeVisitor):
     def __init__(
         self,
@@ -2357,10 +2436,13 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.network_calls: list[OperationalCall] = []
         self.http_calls: list[OperationalCall] = []
         self.tempfile_mktemp_calls: list[OperationalCall] = []
-        # Depth inside code this scope's flow index does not model: class
-        # bodies and lambda bodies. Calls there are still checked by the rules
-        # that need no flow analysis (SLP010, SLP019).
+        # Depth inside lambda bodies, which this scope's flow index does not
+        # model. Calls there are still checked by the rules that need no flow
+        # analysis (SLP010, SLP019); see _check_operational_scope for why the
+        # flow-based rules skip lambdas.
         self.detached_depth = 0
+        # Class bodies are checked as scopes of their own.
+        self.class_defs: list[ast.ClassDef] = []
         # Lambda parameters and comprehension targets shadow module aliases
         # inside their scope.
         self.shadowed: list[set[str]] = []
@@ -2418,12 +2500,9 @@ class _OperationalCallVisitor(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         for expression in (*node.decorator_list, *node.bases, *node.keywords):
             self.visit(expression)
-        # The class body runs once, at definition time. Methods inside it
-        # are visited for their decorators and defaults only.
-        self.detached_depth += 1
-        for statement in node.body:
-            self.visit(statement)
-        self.detached_depth -= 1
+        # The class body runs once, at definition time, as a straight-line
+        # block of its own; _check_operational_scope checks it separately.
+        self.class_defs.append(node)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         self._visit_definition_time(node)
@@ -8493,7 +8572,11 @@ class SlopVisitor(ast.NodeVisitor):
         self.protocol_stack.append(is_protocol)
         self.kind_stack.append("class")
         self.unittest_case_stack.append(is_unittest_case)
-        class_aliases = dict(outer_aliases)
+        # A class body is not an enclosing scope: a nested class resolves
+        # names in the nearest function or module scope, not in the class it
+        # is nested in. Bases and decorators still use ``outer_aliases``.
+        body_scope_aliases = self._enclosing_non_class_aliases()
+        class_aliases = dict(body_scope_aliases)
         self.alias_stack.append(class_aliases)
 
         body_nodes = {id(statement) for statement in node.body}
@@ -8504,7 +8587,7 @@ class SlopVisitor(ast.NodeVisitor):
         self._visit_definition_block(
             node.body,
             class_aliases,
-            fallback_aliases=outer_aliases,
+            fallback_aliases=body_scope_aliases,
         )
 
         self.alias_stack.pop()
@@ -8512,6 +8595,18 @@ class SlopVisitor(ast.NodeVisitor):
         self.protocol_stack.pop()
         self.kind_stack.pop()
         self.scope.pop()
+
+    def _enclosing_non_class_aliases(self) -> dict[str, str]:
+        """Aliases of the nearest enclosing function or module scope.
+
+        ``alias_stack[0]`` is the module; ``alias_stack[i + 1]`` belongs to
+        ``kind_stack[i]``.
+        """
+
+        for depth in range(len(self.kind_stack) - 1, -1, -1):
+            if self.kind_stack[depth] != "class":
+                return self.alias_stack[depth + 1]
+        return self.alias_stack[0]
 
     def _base_is_unittest_case(
         self,
@@ -9296,7 +9391,23 @@ class SlopVisitor(ast.NodeVisitor):
         aliases: dict[str, str],
         *,
         local_names: set[str] | None = None,
+        class_scope: bool = False,
     ) -> None:
+        """Check the operational rules for one scope's statements.
+
+        Class bodies are their own scopes (``class_scope``): they run once at
+        definition time, so enclosing handlers do apply. A command status,
+        subprocess result or HTTP response bound to a name there becomes a
+        class attribute that other code can read, so it counts as observed.
+
+        Lambda bodies are not checked by the flow-based rules (SLP009, SLP018,
+        the HTTP status check). Their helpers resolve the containing statement
+        and enclosing exception handlers by walking parents, which would cross
+        into the defining scope, but a lambda runs later, outside those
+        handlers. SLP018 could not fire there anyway: a lambda has no
+        statements, so no expression statement can discard a status.
+        """
+
         visitor = _OperationalCallVisitor(
             aliases,
             self.node_aliases,
@@ -9304,6 +9415,48 @@ class SlopVisitor(ast.NodeVisitor):
         )
         for statement in body:
             visitor.visit(statement)
+        if class_scope:
+            _drop_class_attribute_bindings(visitor, body)
+        self._report_flow_rules(visitor, body)
+        self._check_tempfile_calls(visitor.tempfile_mktemp_calls)
+
+        for call in visitor.network_calls:
+            if _call_has_timeout(call.node, call.qualified_name):
+                continue
+            self.add_finding(
+                call.node,
+                "SLP010",
+                f"`{call.qualified_name}` omits a timeout or sets it to None; "
+                "pass `timeout=...`",
+                evidence=(
+                    f"resolved call is `{call.qualified_name}`",
+                    "no non-None timeout argument was found",
+                ),
+            )
+
+        for class_def in visitor.class_defs:
+            # Names the class body binds (imports, assignments) come from its
+            # own alias snapshot, not from the enclosing function's.
+            self._check_operational_scope(
+                class_def.body,
+                aliases,
+                local_names=(
+                    None
+                    if local_names is None
+                    else local_names.union(
+                        *(_class_scope_bindings(stmt) for stmt in class_def.body)
+                    )
+                ),
+                class_scope=True,
+            )
+
+    def _report_flow_rules(
+        self,
+        visitor: _OperationalCallVisitor,
+        body: Sequence[ast.stmt],
+    ) -> None:
+        """Report SLP009, SLP018 and SLP011, which need the scope's flow index."""
+
         flow_indexes: dict[tuple[tuple[str, str], ...], _OperationalFlowIndex] = {}
 
         def flow_index_for(call: OperationalCall) -> _OperationalFlowIndex:
@@ -9333,22 +9486,6 @@ class SlopVisitor(ast.NodeVisitor):
                     f"resolved call is `{call.qualified_name}`",
                     "the returned command status has no observable consumer on "
                     "every normal continuation",
-                ),
-            )
-
-        self._check_tempfile_calls(visitor.tempfile_mktemp_calls)
-
-        for call in visitor.network_calls:
-            if _call_has_timeout(call.node, call.qualified_name):
-                continue
-            self.add_finding(
-                call.node,
-                "SLP010",
-                f"`{call.qualified_name}` omits a timeout or sets it to None; "
-                "pass `timeout=...`",
-                evidence=(
-                    f"resolved call is `{call.qualified_name}`",
-                    "no non-None timeout argument was found",
                 ),
             )
 
