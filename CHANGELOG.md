@@ -17,6 +17,8 @@
   that may carry it; a `**{...}` dict literal is still checked.
 - An unreadable subdirectory is now an operational error (exit 2); it was skipped
   silently and the incomplete scan reported as clean.
+- `SLP000` now reports code that parses but does not compile (`return` outside a
+  function, `break` outside a loop, duplicate parameters, top-level `await`).
 
 ## 2.5.0 - 2026-10-11
 

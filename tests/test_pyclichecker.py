@@ -7561,5 +7561,46 @@ class UnreadableDirectoryTests(unittest.TestCase):
         self.assertIn("cannot read directory", error)
 
 
+class CompileErrorTests(unittest.TestCase):
+    def codes(self, source: str) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings]
+
+    def test_code_that_parses_but_does_not_compile_is_slp000(self) -> None:
+        for source in (
+            "return 1\n",
+            "break\n",
+            "def f(x, x):\n    return x\n",
+            "await g()\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.codes(source), ["SLP000"])
+
+    def test_valid_generators_async_and_future_imports_compile(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                from __future__ import annotations
+
+                def gen():
+                    yield 1
+
+                async def run(g):
+                    await g()
+                    async for _ in g():
+                        break
+                """),
+            [],
+        )
+
+    def test_compile_error_respects_slp000_selection(self) -> None:
+        config = replace(
+            pyclichecker.LintConfig(),
+            enabled_codes=frozenset(pyclichecker.RULES) - {"SLP000"},
+        )
+        self.assertEqual(pyclichecker.lint_source("return 1\n", config=config), [])
+
+
 if __name__ == "__main__":
     unittest.main()
