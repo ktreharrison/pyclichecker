@@ -244,7 +244,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_CLEAN
 
     selected = _expand_codes(arguments.select, parser)
-    ignored = _expand_codes(arguments.ignore, parser) if arguments.ignore else set()
+    # An empty --select means ALL, but an --ignore that parses to nothing
+    # (for example "," from a CI script joining an empty list) must ignore
+    # nothing, not everything.
+    ignored = (
+        _expand_codes(arguments.ignore, parser)
+        if parse_rule_codes(arguments.ignore or "")
+        else set()
+    )
     config = LintConfig(
         enabled_codes=frozenset(selected - ignored),
         ignored_codes=frozenset(ignored),

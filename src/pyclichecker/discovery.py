@@ -43,8 +43,15 @@ def _python_files_in_directory(
     root: Path,
     *,
     exclude_patterns: Sequence[str],
+    errors: list[str],
 ) -> Iterable[Path]:
-    for current, directories, files in os.walk(root):
+    def record(error: OSError) -> None:
+        # os.walk skips unreadable directories silently by default, which
+        # reported an incomplete scan as clean (exit 0). An unread directory
+        # is an operational error.
+        errors.append(f"cannot read directory {error.filename}: {error.strerror}")
+
+    for current, directories, files in os.walk(root, onerror=record):
         current_path = Path(current)
         relative_current = current_path.relative_to(root)
         directories[:] = sorted(
@@ -93,6 +100,7 @@ def discover_python_files(
             candidates = _python_files_in_directory(
                 path,
                 exclude_patterns=exclude_patterns,
+                errors=errors,
             )
         else:
             errors.append(f"unsupported path type: {raw_input}")
@@ -114,6 +122,31 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _lint_one(
+    source: str,
+    display_path: str,
+    config: LintConfig,
+    findings: list[Finding],
+    errors: list[str],
+) -> bool:
+    """Lint one source, recording resource exhaustion as an operational error.
+
+    Deeply nested expressions exhaust the parser or the recursive visitors.
+    Letting that escape gave a traceback and exit 1 (the "findings" code)
+    and dropped every other file's findings, including JSON output.
+    """
+
+    try:
+        file_findings = lint_source(source, path=display_path, config=config)
+    except (RecursionError, MemoryError) as error:
+        errors.append(
+            f"{display_path}: too deeply nested to analyze ({type(error).__name__})"
+        )
+        return False
+    findings.extend(file_findings)
+    return True
+
+
 def lint_files(
     files: Sequence[Path],
     *,
@@ -132,8 +165,8 @@ def lint_files(
         except (OSError, UnicodeError, ValueError) as error:
             errors.append(f"<stdin>: {error}")
         else:
-            findings.extend(lint_source(source, path="<stdin>", config=config))
-            files_checked += 1
+            if _lint_one(source, "<stdin>", config, findings, errors):
+                files_checked += 1
 
     for path in files:
         display_path = _display_path(path)
@@ -143,8 +176,8 @@ def lint_files(
         except (OSError, SyntaxError, UnicodeError) as error:
             errors.append(f"{display_path}: {error}")
             continue
-        findings.extend(lint_source(source, path=display_path, config=config))
-        files_checked += 1
+        if _lint_one(source, display_path, config, findings, errors):
+            files_checked += 1
 
     return (
         sorted(

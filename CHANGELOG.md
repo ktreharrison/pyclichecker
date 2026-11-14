@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.6.0 - 2026-11-14
+
+- `SLP020` no longer treats pytest markers (`@pytest.mark.*`, also via `from pytest import mark`) as registering decorators, so a marker-decorated stub stays an `SLP001` error; `@pytest.fixture` stubs remain `SLP020`.
+- README: a Test code section on `SLP009` volume in tests and the existing
+  `--exclude`, `--ignore` and `--baseline` options (#13). Rule severity is
+  unchanged.
+- `SLP004` no longer reports a nested `async def` that is passed, returned or
+  stored, or a function registered through a decorator: the caller requires the
+  async signature (#12). pytest markers do not count. Async comprehensions now
+  count as async behavior; they were false positives. On httpx b5addb6, SLP004
+  went from 40 to 10.
+- Added `SLP020` (low confidence). `SLP001` placeholders that show a sign of intent (a class method that raises `NotImplementedError`, a docstring describing a subclass hook, or a nested function that is passed or returned) are reported as `SLP020` instead of `SLP001`. Existing `# noqa: SLP001` comments and baselines still apply to them, `--select SLP001` still reports them, and `--ignore SLP001` still hides them.
+- `SLP020` docstring signals (subclass, override, hook, by default, no-op) now match
+  whole words. A substring test read "webhook" as "hook" and reported a concrete
+  stub as a warning instead of an `SLP001` error, so `--fail-on error` passed it.
+  Inflected forms such as "overridden" and "hooks" now also count.
+- A nested function passed on through a conditional or boolean expression
+  (`register(cb if flag else None)`, `cb or default`) now counts as escaping.
+- A file too deeply nested to analyze (`RecursionError`, `MemoryError`) is now
+  reported as an operational error (exit 2) instead of crashing with exit 1, and
+  the other files' findings are still reported.
+- `--ignore` with only separators (for example `","`) no longer ignores every rule.
+- `SLP010` no longer reports a missing timeout when the call passes `**options`
+  that may carry it; a `**{...}` dict literal is still checked.
+- An unreadable subdirectory is now an operational error (exit 2); it was skipped
+  silently and the incomplete scan reported as clean.
+- `SLP000` now reports code that parses but does not compile (`return` outside a
+  function, `break` outside a loop, duplicate parameters, top-level `await`).
+- `SLP019` and `SLP010` now check class bodies, decorators, default arguments and
+  lambda bodies, which run at definition time and were skipped.
+- `SLP018` now follows every name in `a = b = os.system(...)` and a bare
+  `(status := os.system(...))`; both were treated as observed without a read.
+- Diagnostic columns count characters, not UTF-8 bytes; a non-ASCII character
+  earlier on the line moved the reported column right. Fingerprints are unchanged.
+- `SLP014` counts a test oracle evaluated in a loop's iterable
+  (`for _ in [pytest.fail(...)]`), which runs even when the body does not.
+- `SLP010` reads a `**{...}` dict literal to the end, so a later duplicate `timeout`
+  key or `**entry` decides the effective timeout.
+- `SLP020` no longer treats a nested callback as escaping when it is only called
+  (`(cb if flag else other)()`) or only truth-tested (`cb and x`).
+- A compile-time `SLP000` honors an explicit `# noqa: SLP000`, and compiling no
+  longer races on the process-wide warning filters when linting from threads.
+- Comprehension targets shadow imported modules of the same name for `SLP010` and
+  `SLP019` (`[tempfile.mktemp() for tempfile in values]` is not a tempfile call).
+
 ## 2.5.0 - 2026-10-11
 
 - Expanded Python runtime and syntax compatibility to Python >=3.12, including
@@ -11,7 +56,6 @@
 - Added `SLP018` for discarded return statuses from `os.system` and
   `subprocess.call`.
 - Added `SLP019` for insecure temporary file creation via `tempfile.mktemp`.
-- Added `SLP020` (low confidence). `SLP001` placeholders that show a sign of intent (a class method that raises `NotImplementedError`, a docstring describing a subclass hook, or a nested function that is passed or returned) are reported as `SLP020` instead of `SLP001`. Existing `# noqa: SLP001` comments and baselines still apply to them, `--select SLP001` still reports them, and `--ignore SLP001` still hides them.
 - Added an executable differential corpus for Ruff, Pyright, ty, and
   pyclichecker, plus explicit source-encoding regression coverage.
 - Documented pyclichecker's place beside formatters, general linters, type

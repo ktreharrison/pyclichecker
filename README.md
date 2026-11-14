@@ -59,7 +59,7 @@ pyclichecker . --format github
 Pin a release when reproducibility matters:
 
 ```bash
-uvx pyclichecker@2.5.0 .
+uvx pyclichecker@2.6.0 .
 ```
 
 ## Reading a result
@@ -137,6 +137,22 @@ Thresholds for function size, comment clusters, and duplicate bodies are
 exposed as command-line options. Run `pyclichecker --help` for their names and
 defaults.
 
+### What `SLP004` can and cannot see
+
+`SLP004` does not report an `async def` whose signature a caller imposes:
+
+- a nested `async def` that its enclosing function passes, returns or stores,
+  such as an event hook given to `AsyncClient(event_hooks=...)` or an ASGI
+  `send` callable;
+- a function registered through a decorator, such as `@app.on_event(...)`.
+  pytest markers such as `@pytest.mark.anyio` do not count: a marked test with
+  no awaits is still reported.
+
+A module-level async hook registered from another file cannot be detected from
+one file's syntax tree, so it is still reported. Suppress it with
+`# noqa: SLP004` and a reason. Async comprehensions
+(`[x async for x in stream]`) count as async behavior.
+
 For a first pass, fix `error` findings before reviewing `warning` findings.
 Warnings are prompts for engineering judgment, not proof that the code is
 wrong.
@@ -161,6 +177,30 @@ normalized AST content rather than line numbers. Syntax-error fingerprints use
 the parser message and offending source line. Moving unchanged code within a
 file therefore does not make an existing finding new. Duplicate fingerprints
 are counted, so adding another copy of an existing defect is still reported.
+
+## Test code
+
+Rules apply to test code with the same severity as application code. That is
+deliberate: a test that reads `result.stdout` without checking `returncode`
+(`SLP009`) can pass while the command it tests fails. It can also dominate a
+report. On typer 00381d6, 292 of 409 findings are `SLP009` under `tests/`.
+
+Choose a policy per repository:
+
+- Keep everything. Use a baseline (above) so only new findings fail the build.
+- Check application code strictly and relax only the noisy rule in tests,
+  with two runs:
+
+  ```bash
+  pyclichecker . --exclude 'tests/*'
+  pyclichecker tests --ignore SLP009
+  ```
+
+- Leave tests out entirely: `pyclichecker . --exclude 'tests/*'`.
+
+`--exclude` matches a glob against each path relative to the scanned root and
+against the file name, and may be repeated. `--exclude tests` also excludes a
+directory named `tests`.
 
 ## Review coverage and performance
 
@@ -222,7 +262,7 @@ installing the package.
 Agents should use the pinned release and JSON output for stable results:
 
 ```bash
-uvx pyclichecker@2.5.0 changed_file.py --format json
+uvx pyclichecker@2.6.0 changed_file.py --format json
 ```
 
 JSON output contains the package version, number of files checked, findings,
@@ -250,7 +290,7 @@ project's `AGENTS.md`:
 After creating or changing Python code:
 
 1. Run pyclichecker on every changed Python file:
-   `uvx pyclichecker@2.5.0 changed_file.py --format json`
+   `uvx pyclichecker@2.6.0 changed_file.py --format json`
 2. Treat exit 1 as findings to fix and exit 2 as an incomplete scan.
 3. Fix findings and rerun relevant tests. Do not add broad suppressions.
 4. Run the final repository gate with the same command, replacing
