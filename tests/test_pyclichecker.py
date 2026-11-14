@@ -7418,7 +7418,9 @@ class CliContractTests(unittest.TestCase):
 
     def test_github_format_escapes_properties_and_messages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            folder = Path(directory) / "a,b:c"
+            # Windows forbids ":" in file names, but its absolute paths
+            # contain one ("D:\\..."), so both escapes are still exercised.
+            folder = Path(directory) / ("a,b" if os.name == "nt" else "a,b:c")
             folder.mkdir()
             dirty = folder / "m.py"
             dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
@@ -7430,8 +7432,11 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         (line,) = output.splitlines()
         self.assertTrue(line.startswith("::error file="), line)
-        self.assertIn("a%2Cb%3Ac", line)
-        self.assertNotIn("a,b:c", line)
+        file_property = line.removeprefix("::error file=").split(",line=", 1)[0]
+        self.assertIn("a%2Cb", file_property)
+        self.assertIn("%3A", file_property)
+        self.assertNotIn(",", file_property)
+        self.assertNotIn(":", file_property)
         self.assertTrue(
             line.endswith(
                 ",line=1,col=1::SLP001 `unfinished` is a concrete placeholder implementation"
