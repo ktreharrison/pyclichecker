@@ -4,7 +4,9 @@ import ast
 import builtins
 import io
 import re
+import threading
 import tokenize
+import warnings
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -307,7 +309,11 @@ def _effective_body(body: Sequence[ast.stmt]) -> tuple[ast.stmt, ...]:
     return result
 
 
-_EXTENSION_POINT_WORDS = ("subclass", "override", "by default", "no-op", "hook")
+# Whole words only: a substring test let "webhook" read as "hook" and moved
+# concrete stubs from SLP001 (error) to SLP020 (warning).
+_EXTENSION_POINT_PATTERN = re.compile(
+    r"\b(?:subclass(?:es|ed|ing)?|overrid(?:e|es|den|ing)|by default|no-op|hooks?)\b"
+)
 _NON_REGISTERING_MODULES = frozenset(
     {
         "abc",
@@ -337,6 +343,10 @@ def _is_registering_decorator(decorator: ast.expr, aliases: dict[str, str]) -> b
     if raw_name.split(".")[-1] in _NON_REGISTERING_ATTRIBUTES:
         return False
     qualified_name = _resolve_imported_name(raw_name, aliases)
+    # pytest markers (``@pytest.mark.slow``, ``@pytest.mark.anyio``) annotate a
+    # test; they register nothing. Shared by SLP020 and SLP004.
+    if qualified_name.startswith("pytest.mark."):
+        return False
     return qualified_name.split(".")[0] not in _NON_REGISTERING_MODULES
 
 
@@ -410,6 +420,28 @@ class _EscapeScanner:
         if isinstance(node, ast.Name) and node.id == self.name and self.started:
             self.visit_name(node, parent)
             return
+        # A conditional or boolean expression yields one of its operands, so
+        # `register(cb if flag else other)` and `cb or default` pass `cb` on.
+        # Judge those operands by the expression's own parent. The IfExp test
+        # is only read for truth, so it keeps the IfExp as its parent.
+        # A callee position (`(cb if flag else other)()`) only calls the
+        # operand, so the operands keep the expression as their parent. In
+        # `a and b`, every operand but the last is read for truth only: a
+        # function is always true, so `cb and x` yields `x`.
+        if isinstance(node, ast.IfExp | ast.BoolOp):
+            yielded = (
+                node if isinstance(parent, ast.Call) and parent.func is node else parent
+            )
+            if isinstance(node, ast.IfExp):
+                self.visit(node.test, node)
+                self.visit(node.body, yielded)
+                self.visit(node.orelse, yielded)
+                return
+            last = len(node.values) - 1
+            for index, value in enumerate(node.values):
+                truth_only = isinstance(node.op, ast.And) and index < last
+                self.visit(value, node if truth_only else yielded)
+            return
         for child in ast.iter_child_nodes(node):
             self.visit(child, node)
         if isinstance(node, ast.ClassDef) and node.name == self.name and self.started:
@@ -471,6 +503,12 @@ class _AsyncBehaviorVisitor(ast.NodeVisitor):
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
         self.found = True
+
+    def visit_comprehension(self, node: ast.comprehension) -> None:
+        # `[x async for x in stream]` iterates asynchronously.
+        if node.is_async:
+            self.found = True
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
@@ -1613,6 +1651,10 @@ class _TestOracleVisitor(ast.NodeVisitor):
                 return
 
     def _visit_for(self, node: ast.For | ast.AsyncFor) -> None:
+        # The iterable is always evaluated, even when the loop body never runs.
+        self.visit(node.iter)
+        if self.found:
+            return
         empty = _literal_iterable_is_empty(node.iter, self.aliases)
         branches = (node.orelse,) if empty is True else (node.body, node.orelse)
         for branch in branches:
@@ -2315,6 +2357,13 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.network_calls: list[OperationalCall] = []
         self.http_calls: list[OperationalCall] = []
         self.tempfile_mktemp_calls: list[OperationalCall] = []
+        # Depth inside code this scope's flow index does not model: class
+        # bodies and lambda bodies. Calls there are still checked by the rules
+        # that need no flow analysis (SLP010, SLP019).
+        self.detached_depth = 0
+        # Lambda parameters and comprehension targets shadow module aliases
+        # inside their scope.
+        self.shadowed: list[set[str]] = []
 
     def visit_Call(self, node: ast.Call) -> None:
         aliases = _aliases_for_scope_snapshot(
@@ -2323,35 +2372,118 @@ class _OperationalCallVisitor(ast.NodeVisitor):
             self.local_names,
         )
         raw_name = _expression_name(node.func)
+        root_name = raw_name.split(".", 1)[0]
+        if any(root_name in names for names in self.shadowed):
+            self.generic_visit(node)
+            return
         qualified_name = _resolve_imported_name(raw_name, aliases)
-        if qualified_name == "subprocess.run":
-            self.subprocess_calls.append(OperationalCall(node, qualified_name, aliases))
-        if qualified_name in {"os.system", "subprocess.call"}:
-            self.command_status_calls.append(
-                OperationalCall(node, qualified_name, aliases)
-            )
+        if self.detached_depth == 0:
+            if qualified_name == "subprocess.run":
+                self.subprocess_calls.append(
+                    OperationalCall(node, qualified_name, aliases)
+                )
+            if qualified_name in {"os.system", "subprocess.call"}:
+                self.command_status_calls.append(
+                    OperationalCall(node, qualified_name, aliases)
+                )
+            if _is_http_call(qualified_name):
+                self.http_calls.append(OperationalCall(node, qualified_name, aliases))
         if qualified_name == "tempfile.mktemp":
             self.tempfile_mktemp_calls.append(
                 OperationalCall(node, qualified_name, aliases)
             )
         if _is_timeout_call(qualified_name):
             self.network_calls.append(OperationalCall(node, qualified_name, aliases))
-        if _is_http_call(qualified_name):
-            self.http_calls.append(OperationalCall(node, qualified_name, aliases))
 
         self.generic_visit(node)
 
+    def _visit_definition_time(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        # Decorators and defaults run in the enclosing scope when the
+        # definition executes; the body is its own scope, checked separately.
+        if not isinstance(node, ast.Lambda):
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        return
+        self._visit_definition_time(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        return
+        self._visit_definition_time(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        return
+        for expression in (*node.decorator_list, *node.bases, *node.keywords):
+            self.visit(expression)
+        # The class body runs once, at definition time. Methods inside it
+        # are visited for their decorators and defaults only.
+        self.detached_depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        self.detached_depth -= 1
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
+        self._visit_definition_time(node)
+        arguments = node.args
+        names = {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        }
+        names.update(
+            extra.arg for extra in (arguments.vararg, arguments.kwarg) if extra
+        )
+        self.shadowed.append(names)
+        self.detached_depth += 1
+        self.visit(node.body)
+        self.detached_depth -= 1
+        self.shadowed.pop()
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
+        results: Sequence[ast.expr],
+    ) -> None:
+        # The first iterable runs in the enclosing scope; targets, later
+        # iterables, conditions and the result run in the comprehension's own
+        # scope, where a target such as `for tempfile in values` hides the
+        # imported module of the same name.
+        first, *rest = node.generators
+        self.visit(first.iter)
+        names = {
+            name.id
+            for generator in node.generators
+            for name in ast.walk(generator.target)
+            if isinstance(name, ast.Name)
+        }
+        self.shadowed.append(names)
+        for condition in first.ifs:
+            self.visit(condition)
+        for generator in rest:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for result in results:
+            self.visit(result)
+        self.shadowed.pop()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node, (node.key, node.value))
 
 
 def _collect_import_aliases(body: Sequence[ast.stmt]) -> dict[str, str]:
@@ -5080,16 +5212,36 @@ def _command_status_is_observed(
         parent = _parent_node(current)
 
     if isinstance(parent, ast.NamedExpr) and parent.value is current:
-        return True
+        # `(status := os.system(...))` as a bare statement binds the status
+        # but does not read it; any other walrus context reads it.
+        statement = _parent_node(parent)
+        if not (isinstance(statement, ast.Expr) and statement.value is parent):
+            return True
+        return _command_status_name_is_observed(call, parent.target.id, flow_index)
     if not isinstance(parent, (ast.Assign, ast.AnnAssign)):
         return not (isinstance(parent, ast.Expr) and parent.value is current)
 
-    result_name = _call_result_name(call.node)
-    if result_name is None:
+    targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+    if not all(isinstance(target, ast.Name) for target in targets):
+        # Stored into an attribute, subscript or unpacking: assume observed.
         return True
+    # `a = b = os.system(...)` binds the status to several names; it is
+    # observed when any of them is.
+    return any(
+        _command_status_name_is_observed(call, target.id, flow_index)
+        for target in targets
+        if isinstance(target, ast.Name)
+    )
+
+
+def _command_status_name_is_observed(
+    call: OperationalCall,
+    name: str,
+    flow_index: _OperationalFlowIndex,
+) -> bool:
     return _result_is_handled_after_assignment(
         call.node,
-        result_name,
+        name,
         _command_status_statement_observes_result,
         flow_index,
     )
@@ -5502,7 +5654,16 @@ def _binding_statement_handling_state(
         parent = _parent_node(current)
     if containing_statement is None:
         return None
-    if isinstance(parent, ast.NamedExpr) and parent.value is current:
+    if (
+        isinstance(parent, ast.NamedExpr)
+        and parent.value is current
+        and not (
+            isinstance(containing_statement, ast.Expr)
+            and containing_statement.value is parent
+        )
+    ):
+        # A bare `(name := call())` statement is an assignment; it falls
+        # through to the later-statement analysis below like `name = call()`.
         return _block_result_handling_state(
             (containing_statement,),
             name,
@@ -6011,7 +6172,46 @@ def _call_has_timeout(node: ast.Call, qualified_name: str) -> bool:
             isinstance(positional_timeout, ast.Constant)
             and positional_timeout.value is None
         )
-    return False
+    # `**options` may carry the timeout. Separate `**` arguments cannot
+    # override one another (a repeated keyword raises TypeError), so the first
+    # definite answer stands. Inside one dict literal, later entries override
+    # earlier ones, so read it to the end. A mapping that cannot be read gets
+    # the benefit of the doubt rather than a report of a timeout that may well
+    # be there.
+    unknown = False
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            continue
+        state = _dict_literal_timeout(keyword.value)
+        if state is None:
+            unknown = True
+        elif state != "absent":
+            return state == "set"
+    return unknown
+
+
+def _dict_literal_timeout(node: ast.expr) -> str | None:
+    """Return "set", "none" or "absent" for a dict literal's effective timeout.
+
+    Returns None when the value is not a dict literal, or a later `**entry`
+    inside it may change the answer.
+    """
+
+    if not isinstance(node, ast.Dict):
+        return None
+    state: str | None = "absent"
+    for key, value in zip(node.keys, node.values, strict=True):
+        if key is None:
+            # `{..., **more}` may add or replace the timeout.
+            inner = _dict_literal_timeout(value)
+            if inner is None:
+                state = None
+            elif inner != "absent":
+                state = inner
+        elif isinstance(key, ast.Constant) and key.value == "timeout":
+            is_none = isinstance(value, ast.Constant) and value.value is None
+            state = "none" if is_none else "set"
+    return state
 
 
 def _blocking_call_guidance(qualified_name: str) -> str:
@@ -7368,8 +7568,10 @@ class SlopVisitor(ast.NodeVisitor):
         module_body: Sequence[ast.stmt],
         module_aliases: dict[str, str],
         header_suppression_lines: dict[int, set[int]],
+        source_lines: Sequence[str] = (),
     ) -> None:
         self.path = path
+        self.source_lines = source_lines
         self.comments = comments
         self.config = config
         self.module_body = tuple(module_body)
@@ -7428,9 +7630,7 @@ class SlopVisitor(ast.NodeVisitor):
             return
 
         finding_line = line if line is not None else getattr(node, "lineno", 1)
-        finding_column = (
-            column if column is not None else getattr(node, "col_offset", 0) + 1
-        )
+        finding_column = column if column is not None else self._node_column(node)
         suppression_lines = {finding_line}
         suppression_lines.update(self.header_suppression_lines.get(id(node), ()))
         containing_statement = _containing_statement(node)
@@ -7484,9 +7684,23 @@ class SlopVisitor(ast.NodeVisitor):
         return RelatedLocation(
             path=self.path,
             line=getattr(node, "lineno", 1),
-            column=getattr(node, "col_offset", 0) + 1,
+            column=self._node_column(node),
             message=message,
         )
+
+    def _node_column(self, node: ast.AST) -> int:
+        """1-based character column of ``node``.
+
+        ``col_offset`` counts UTF-8 bytes, so any non-ASCII character earlier
+        on the line pushed reported columns to the right.
+        """
+
+        offset = getattr(node, "col_offset", 0)
+        line_number = getattr(node, "lineno", 0)
+        if 1 <= line_number <= len(self.source_lines):
+            prefix = self.source_lines[line_number - 1].encode("utf-8")[:offset]
+            return len(prefix.decode("utf-8", errors="replace")) + 1
+        return offset + 1
 
     def _is_suppressed(self, line: int, code: str) -> bool:
         for comment in self.comments_by_line.get(line, ()):
@@ -8592,6 +8806,29 @@ class SlopVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node, is_async=True)
 
+    def _async_signature_is_imposed(self, record: FunctionRecord) -> bool:
+        """Return True when a caller, not the body, requires the function be async.
+
+        A nested ``async def`` that the enclosing function passes, returns or
+        stores, and a function registered through a decorator, are callbacks:
+        the API that receives them awaits them, so ``async`` is part of the
+        contract even when the body never awaits. A module-level hook
+        registered from another file cannot be seen from one file's AST and is
+        still reported.
+        """
+
+        aliases = self.alias_stack[-1]
+        for decorator in record.node.decorator_list:
+            # pytest markers are excluded inside _is_registering_decorator.
+            if _is_registering_decorator(decorator, aliases):
+                return True
+        enclosing = self.kind_stack[-1] if self.kind_stack else ""
+        return (
+            enclosing == "function"
+            and bool(self.function_stack)
+            and _nested_function_escapes(self.function_stack[-1], record.node)
+        )
+
     def _extension_point_reason(self, record: FunctionRecord) -> str | None:
         """Return why a placeholder may be intentional, or None when it is not."""
 
@@ -8606,7 +8843,7 @@ class SlopVisitor(ast.NodeVisitor):
             if isinstance(statement, ast.Raise):
                 return "a class method raises NotImplementedError without abc.abstractmethod"
             docstring = (ast.get_docstring(record.node) or "").lower()
-            if any(word in docstring for word in _EXTENSION_POINT_WORDS):
+            if _EXTENSION_POINT_PATTERN.search(docstring):
                 return "its docstring describes a subclass hook or default"
             return None
         if enclosing == "function" and self.function_stack:
@@ -8661,6 +8898,7 @@ class SlopVisitor(ast.NodeVisitor):
             and not placeholder
             and not record.exempt
             and not _contains_async_behavior(record.effective_body)
+            and not self._async_signature_is_imposed(record)
         ):
             self.add_finding(
                 record.node,
@@ -9337,6 +9575,52 @@ def _collect_header_suppression_lines(
     return suppression_lines
 
 
+def _syntax_error_findings(
+    source: str, path: str, error: SyntaxError, config: LintConfig
+) -> list[Finding]:
+    """Report a parser or compiler SyntaxError as SLP000, unless disabled or suppressed."""
+
+    if "SLP000" not in config.enabled_codes:
+        return []
+    # Honor an explicit SLP000 suppression comment on the reported line, as
+    # for any other rule. collect_comments tolerates source that cannot tokenize.
+    reported_line = error.lineno or 1
+    if any(
+        comment.line == reported_line
+        and "SLP000" in _comment_suppression_codes(comment.text)
+        for comment in collect_comments(source)
+    ):
+        return []
+    message = error.msg or "invalid Python syntax"
+    return [
+        Finding(
+            path=path,
+            line=error.lineno or 1,
+            column=error.offset or 1,
+            code="SLP000",
+            message=message,
+            evidence=(f"Python parser reported: {message}",),
+            fingerprint=make_fingerprint(
+                path,
+                "SLP000",
+                "\0".join(
+                    (
+                        message,
+                        (
+                            source.splitlines()[error.lineno - 1].strip()
+                            if error.lineno and error.lineno <= len(source.splitlines())
+                            else ""
+                        ),
+                    )
+                ),
+            ),
+        )
+    ]
+
+
+_COMPILE_WARNINGS_LOCK = threading.Lock()
+
+
 def lint_source(
     source: str,
     *,
@@ -9348,35 +9632,17 @@ def lint_source(
     active_config = config or LintConfig()
     try:
         tree = ast.parse(source, filename=path, type_comments=True)
+        # ast.parse accepts code the compiler rejects: `return` outside a
+        # function, `break` outside a loop, duplicate parameters. Compile the
+        # tree (never execute it) so those are reported as SLP000 too.
+        # Compiler warnings (for example invalid escapes) are not findings.
+        # catch_warnings() swaps the process-wide filter list, so concurrent
+        # callers would restore each other's filters out of order. Serialize.
+        with _COMPILE_WARNINGS_LOCK, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            compile(tree, path, "exec", dont_inherit=True)
     except SyntaxError as error:
-        if "SLP000" not in active_config.enabled_codes:
-            return []
-        message = error.msg or "invalid Python syntax"
-        return [
-            Finding(
-                path=path,
-                line=error.lineno or 1,
-                column=error.offset or 1,
-                code="SLP000",
-                message=message,
-                evidence=(f"Python parser reported: {message}",),
-                fingerprint=make_fingerprint(
-                    path,
-                    "SLP000",
-                    "\0".join(
-                        (
-                            message,
-                            (
-                                source.splitlines()[error.lineno - 1].strip()
-                                if error.lineno
-                                and error.lineno <= len(source.splitlines())
-                                else ""
-                            ),
-                        )
-                    ),
-                ),
-            )
-        ]
+        return _syntax_error_findings(source, path, error, active_config)
 
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
@@ -9394,6 +9660,9 @@ def lint_source(
         module_body=tree.body,
         module_aliases=module_aliases,
         header_suppression_lines=_collect_header_suppression_lines(source, tree),
+        # Universal newlines only, matching AST line numbers; str.splitlines
+        # also breaks on form feeds and Unicode separators.
+        source_lines=io.StringIO(source, newline=None).readlines(),
     )
     visitor.visit(tree)
     visitor.finalize()

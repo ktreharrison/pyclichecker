@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import re
 import tempfile
 import textwrap
@@ -7255,6 +7256,829 @@ class CliTests(unittest.TestCase):
         self.assertIn(
             "Repository, https://github.com/ktreharrison/pyclichecker",
             package_metadata.get_all("Project-URL", []),
+        )
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Defects and untested branches found in the 14 Nov 2026 review."""
+
+    def codes(self, source: str) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings]
+
+    def test_extension_point_words_match_whole_words_only(self) -> None:
+        # "webhook" contains "hook"; a substring test moved this concrete stub
+        # from SLP001 (error) to SLP020 (warning), so --fail-on error passed.
+        self.assertEqual(
+            self.codes("""
+                class Notifier:
+                    def send_webhook(self):
+                        \"\"\"Post the payload to the customer webhook.\"\"\"
+                        pass
+                """),
+            ["SLP001"],
+        )
+
+    def test_extension_point_words_still_signal_as_words(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                class Base:
+                    def on_save(self):
+                        \"\"\"Hooks run after save.\"\"\"
+                        pass
+
+                    def on_load(self):
+                        \"\"\"Overridden in plugins.\"\"\"
+                        pass
+                """),
+            ["SLP020", "SLP020"],
+        )
+
+    def test_nested_callback_passed_through_conditional_or_boolean_escapes(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.codes("""
+                def conditional(register, flag):
+                    def on_event():
+                        pass
+                    register(on_event if flag else None)
+
+                def boolean(register, default):
+                    def on_event():
+                        pass
+                    handler = on_event or default
+                    register(handler)
+                """),
+            ["SLP020", "SLP020"],
+        )
+
+    def test_nested_callback_in_conditional_test_does_not_escape(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def outer(register, a, b):
+                    def on_event():
+                        pass
+                    register(a if on_event else b)
+                """),
+            ["SLP001"],
+        )
+
+    def test_nested_callback_as_dict_key_does_not_escape_but_value_does(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.codes("""
+                def keyed():
+                    def on_event():
+                        pass
+                    table = {on_event: 1}
+                    return len(table)
+
+                def valued():
+                    def on_event():
+                        pass
+                    return {"event": on_event}
+                """),
+            ["SLP001", "SLP020"],
+        )
+
+    def test_reference_before_nested_definition_is_not_an_escape(self) -> None:
+        # The earlier `register(on_event)` passes the parameter, not the stub.
+        self.assertEqual(
+            self.codes("""
+                def outer(register, on_event):
+                    register(on_event)
+                    def on_event():
+                        pass
+                """),
+            ["SLP001"],
+        )
+
+    def test_later_function_or_class_rebinding_stops_the_search(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def by_function(register):
+                    def on_event():
+                        pass
+                    def on_event():
+                        return 1
+                    register(on_event)
+
+                def by_class(register):
+                    def on_event():
+                        pass
+                    class on_event:
+                        value = 1
+                    register(on_event)
+                """),
+            ["SLP001", "SLP001"],
+        )
+
+    def test_scanner_handles_lambdas_and_keyword_only_parameters(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def lambda_sibling(register):
+                    def on_event():
+                        pass
+                    later = lambda: 0
+                    register(later)
+
+                def keyword_default(register):
+                    def on_event():
+                        pass
+                    def wrapper(*, required, callback=on_event):
+                        return callback
+                    register(wrapper)
+                """),
+            ["SLP001", "SLP020"],
+        )
+
+
+class CliContractTests(unittest.TestCase):
+    """CLI behaviour AGENTS.md promises but no test pinned down."""
+
+    run_main = CliTests.run_main
+
+    def test_exit_code_values_are_part_of_the_contract(self) -> None:
+        self.assertEqual(
+            (
+                pyclichecker.EXIT_CLEAN,
+                pyclichecker.EXIT_FINDINGS,
+                pyclichecker.EXIT_OPERATIONAL_ERROR,
+            ),
+            (0, 1, 2),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dirty = Path(directory) / "dirty.py"
+            dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            self.assertEqual(self.run_main([str(dirty)])[0], 1)
+            self.assertEqual(self.run_main([str(Path(directory) / "missing.py")])[0], 2)
+
+    def test_github_format_escapes_properties_and_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # Windows forbids ":" in file names, but its absolute paths
+            # contain one ("D:\\..."), so both escapes are still exercised.
+            folder = Path(directory) / ("a,b" if os.name == "nt" else "a,b:c")
+            folder.mkdir()
+            dirty = folder / "m.py"
+            dirty.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            exit_code, output, _ = self.run_main([str(dirty), "--format", "github"])
+            missing_code, missing_output, _ = self.run_main(
+                [str(folder / "missing.py"), "--format", "github"]
+            )
+
+        self.assertEqual(exit_code, 1)
+        (line,) = output.splitlines()
+        self.assertTrue(line.startswith("::error file="), line)
+        file_property = line.removeprefix("::error file=").split(",line=", 1)[0]
+        self.assertIn("a%2Cb", file_property)
+        self.assertIn("%3A", file_property)
+        self.assertNotIn(",", file_property)
+        self.assertNotIn(":", file_property)
+        self.assertTrue(
+            line.endswith(
+                ",line=1,col=1::SLP001 `unfinished` is a concrete placeholder implementation"
+            ),
+            line,
+        )
+        self.assertEqual(missing_code, 2)
+        self.assertTrue(
+            missing_output.startswith("::error title=pyclichecker::"), missing_output
+        )
+
+    def test_select_accepts_prefixes_and_rejects_unknown_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dirty = Path(directory) / "dirty.py"
+            # SLP001 is inside the SLP00 prefix; SLP019 is outside it.
+            dirty.write_text(
+                "import tempfile\n\npath = tempfile.mktemp()\n\n\n"
+                "def unfinished():\n    pass\n",
+                encoding="utf-8",
+            )
+            prefix = self.run_main(
+                [str(dirty), "--select", "SLP00", "--format", "json"]
+            )
+            other = self.run_main([str(dirty), "--select", "SLP019"])
+            with (
+                self.assertRaises(SystemExit) as raised,
+                redirect_stderr(io.StringIO()),
+            ):
+                pyclichecker.main([str(dirty), "--select", "SLPX"])
+
+        self.assertEqual(prefix[0], 1)
+        self.assertIn('"SLP001"', prefix[1])
+        self.assertNotIn('"SLP019"', prefix[1])
+        self.assertEqual(other[0], 1)
+        self.assertIn("SLP019", other[1])
+        self.assertNotIn("SLP001", other[1])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_threshold_arguments_accept_zero_and_reject_negatives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            clean = Path(directory) / "clean.py"
+            clean.write_text(
+                "def identity(value):\n    return value\n", encoding="utf-8"
+            )
+            accepted = self.run_main([str(clean), "--max-function-lines", "0"])
+            with (
+                self.assertRaises(SystemExit) as raised,
+                redirect_stderr(io.StringIO()),
+            ):
+                pyclichecker.main([str(clean), "--max-function-lines", "-1"])
+
+        self.assertEqual(accepted[0], 0)
+        self.assertEqual(raised.exception.code, 2)
+
+
+class OperationalErrorTests(unittest.TestCase):
+    """Exit-code contract for inputs that exhaust the analyzer."""
+
+    run_main = CliTests.run_main
+
+    def test_deeply_nested_file_is_an_operational_error_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deep = root / "deep.py"
+            deep.write_text("x = " + "+".join(["1"] * 5000) + "\n", encoding="utf-8")
+            stub = root / "stub.py"
+            stub.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            exit_code, output, error = self.run_main(
+                [str(deep), str(stub), "--format", "json"]
+            )
+
+        self.assertEqual(exit_code, 2)
+        payload = json.loads(output)
+        self.assertEqual(
+            [finding["code"] for finding in payload["findings"]], ["SLP001"]
+        )
+        self.assertTrue(
+            any("too deeply nested" in item for item in payload["errors"]), payload
+        )
+
+    def test_ignore_that_parses_to_nothing_ignores_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            stub = Path(directory) / "stub.py"
+            stub.write_text("def unfinished():\n    pass\n", encoding="utf-8")
+            results = [
+                self.run_main([str(stub), "--ignore", value])
+                for value in (",", " ", "")
+            ]
+
+        self.assertEqual([result[0] for result in results], [1, 1, 1])
+
+
+class TimeoutKeywordExpansionTests(unittest.TestCase):
+    def codes(self, call: str) -> list[str]:
+        source = f"import requests\nopts = {{'timeout': 5}}\nr = {call}\nr.raise_for_status()\n"
+        findings = pyclichecker.lint_source(
+            source, path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings if finding.code == "SLP010"]
+
+    def test_unknown_mapping_expansion_is_not_reported(self) -> None:
+        self.assertEqual(self.codes('requests.get("https://x", **opts)'), [])
+
+    def test_dict_literal_expansion_is_checked(self) -> None:
+        self.assertEqual(self.codes('requests.get("https://x", **{"timeout": 5})'), [])
+        self.assertEqual(
+            self.codes('requests.get("https://x", **{"verify": True})'), ["SLP010"]
+        )
+        self.assertEqual(
+            self.codes('requests.get("https://x", **{"timeout": None})'), ["SLP010"]
+        )
+
+    def test_plain_missing_timeout_is_still_reported(self) -> None:
+        self.assertEqual(self.codes('requests.get("https://x")'), ["SLP010"])
+
+
+class UnreadableDirectoryTests(unittest.TestCase):
+    run_main = CliTests.run_main
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions")
+    def test_unreadable_subdirectory_is_an_operational_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "good.py").write_text("x = 1\n", encoding="utf-8")
+            hidden = root / "hidden"
+            hidden.mkdir()
+            (hidden / "bad.py").write_text("def f():\n    pass\n", encoding="utf-8")
+            hidden.chmod(0)
+            try:
+                exit_code, _, error = self.run_main([str(root)])
+            finally:
+                hidden.chmod(0o755)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("cannot read directory", error)
+
+
+class CompileErrorTests(unittest.TestCase):
+    def codes(self, source: str) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings]
+
+    def test_code_that_parses_but_does_not_compile_is_slp000(self) -> None:
+        for source in (
+            "return 1\n",
+            "break\n",
+            "def f(x, x):\n    return x\n",
+            "await g()\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.codes(source), ["SLP000"])
+
+    def test_valid_generators_async_and_future_imports_compile(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                from __future__ import annotations
+
+                def gen():
+                    yield 1
+
+                async def run(g):
+                    await g()
+                    async for _ in g():
+                        break
+                """),
+            [],
+        )
+
+    def test_compile_error_respects_slp000_selection(self) -> None:
+        config = replace(
+            pyclichecker.LintConfig(),
+            enabled_codes=frozenset(pyclichecker.RULES) - {"SLP000"},
+        )
+        self.assertEqual(pyclichecker.lint_source("return 1\n", config=config), [])
+
+
+class DefinitionTimeScopeTests(unittest.TestCase):
+    def codes(self, source: str) -> list[tuple[int, str]]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(finding.line, finding.code) for finding in findings]
+
+    def test_slp019_in_class_body_default_and_lambda(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import tempfile
+
+                class C:
+                    path = tempfile.mktemp()
+
+                def f(path=tempfile.mktemp()):
+                    return path
+
+                g = lambda: tempfile.mktemp()
+                """),
+            [(5, "SLP019"), (7, "SLP019"), (10, "SLP019")],
+        )
+
+    def test_slp010_in_method_default_and_class_body(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import requests
+
+                class Client:
+                    banner = requests.get("https://x")
+
+                    def fetch(self, seed=requests.get("https://y")):
+                        return seed
+                """),
+            [(5, "SLP010"), (7, "SLP010")],
+        )
+
+    def test_corrected_and_shadowed_definition_time_calls_are_clean(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import tempfile
+
+                class C:
+                    handle = tempfile.NamedTemporaryFile()
+
+                def f(path=tempfile.mkdtemp()):
+                    return path
+
+                make = lambda tempfile: tempfile.mktemp()
+                """),
+            [],
+        )
+
+    def test_function_body_calls_are_not_reported_twice(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import tempfile
+
+                class C:
+                    def method(self):
+                        return tempfile.mktemp()
+
+                def outer():
+                    inner = lambda: tempfile.mktemp()
+                    return inner
+                """),
+            [(6, "SLP019"), (9, "SLP019")],
+        )
+
+
+class CommandStatusBindingTests(unittest.TestCase):
+    def codes(self, body: str) -> list[str]:
+        source = "import os\n\ndef run():\n" + textwrap.indent(
+            textwrap.dedent(body), "    "
+        )
+        findings = pyclichecker.lint_source(
+            source, path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [finding.code for finding in findings if finding.code == "SLP018"]
+
+    def test_discarded_multi_target_and_walrus_bindings_are_reported(self) -> None:
+        self.assertEqual(self.codes('a = b = os.system("false")\n'), ["SLP018"])
+        self.assertEqual(self.codes('(status := os.system("false"))\n'), ["SLP018"])
+
+    def test_reading_any_bound_name_observes_the_status(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                a = b = os.system("false")
+                if b:
+                    raise SystemExit(b)
+                """),
+            [],
+        )
+        self.assertEqual(
+            self.codes("""
+                (status := os.system("false"))
+                if status:
+                    raise SystemExit(status)
+                """),
+            [],
+        )
+
+    def test_walrus_read_in_place_and_stored_targets_stay_observed(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                if (status := os.system("false")):
+                    raise SystemExit(status)
+                """),
+            [],
+        )
+        self.assertEqual(
+            self.codes('self_status = [os.system("x")]\nreturn self_status\n'), []
+        )
+
+
+class CharacterColumnTests(unittest.TestCase):
+    def locations(self, source: str) -> list[tuple[int, int]]:
+        findings = pyclichecker.lint_source(
+            source, path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(finding.line, finding.column) for finding in findings]
+
+    def test_columns_count_characters_not_utf8_bytes(self) -> None:
+        self.assertEqual(
+            self.locations("import tempfile\né = 1; tempfile.mktemp()\n"), [(2, 8)]
+        )
+        self.assertEqual(
+            self.locations('import tempfile\nx = "🦀"; tempfile.mktemp()\n'), [(2, 10)]
+        )
+
+    def test_ascii_columns_and_fingerprints_are_unchanged(self) -> None:
+        ascii_source = "import tempfile\ne = 1; tempfile.mktemp()\n"
+        unicode_source = "import tempfile\né = 1; tempfile.mktemp()\n"
+        ascii_finding = pyclichecker.lint_source(ascii_source, path="app.py")[0]
+        unicode_finding = pyclichecker.lint_source(unicode_source, path="app.py")[0]
+        self.assertEqual(ascii_finding.column, 8)
+        self.assertEqual(ascii_finding.fingerprint, unicode_finding.fingerprint)
+
+    def test_form_feed_and_crlf_do_not_shift_lines(self) -> None:
+        self.assertEqual(
+            self.locations("import tempfile\r\n\x0c\r\né = 1; tempfile.mktemp()\r\n"),
+            [(3, 8)],
+        )
+
+
+class LoopIterableOracleTests(unittest.TestCase):
+    def codes(self, source: str) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source),
+            path="tests/test_app.py",
+            config=pyclichecker.LintConfig(),
+        )
+        return [finding.code for finding in findings if finding.code == "SLP014"]
+
+    def test_oracle_in_loop_iterable_counts(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import pytest
+
+                def test_fails():
+                    for _ in [pytest.fail("x")]:
+                        pass
+
+                async def test_async(stream):
+                    async for _ in stream(pytest.fail("y")):
+                        pass
+                """),
+            [],
+        )
+
+    def test_loop_without_any_oracle_is_still_reported(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def test_nothing(items):
+                    for item in items:
+                        print(item)
+                """),
+            ["SLP014"],
+        )
+
+
+class SourceryReviewTests(unittest.TestCase):
+    """Defects from the Sourcery review of PR #17."""
+
+    def codes(self, source: str, code: str | None = None) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f.code for f in findings if code is None or f.code == code]
+
+    def timeout_codes(self, call: str) -> list[str]:
+        source = f"import requests\nr = {call}\nr.raise_for_status()\n"
+        return self.codes(source, "SLP010")
+
+    def test_later_dict_literal_entries_decide_the_timeout(self) -> None:
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": 5, "timeout": None})'),
+            ["SLP010"],
+        )
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": None, "timeout": 5})'),
+            [],
+        )
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{**opts, "timeout": None})'),
+            ["SLP010"],
+        )
+        # A later **entry inside the literal may replace an explicit None.
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": None, **opts})'), []
+        )
+
+    def test_separate_unpackings_cannot_override_an_explicit_timeout(self) -> None:
+        # A keyword repeated across `**` arguments raises TypeError, so an
+        # explicit None stays the effective value.
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": None}, **opts)'),
+            ["SLP010"],
+        )
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", timeout=None, **opts)'), ["SLP010"]
+        )
+
+    def test_callee_and_truth_only_operands_do_not_escape(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def callee(flag, other):
+                    def on_event():
+                        pass
+                    (on_event if flag else other)()
+
+                def bool_callee(other):
+                    def on_event():
+                        pass
+                    (on_event or other)()
+
+                def and_head(register, flag):
+                    def on_event():
+                        pass
+                    register(on_event and flag)
+                """),
+            ["SLP001", "SLP001", "SLP001"],
+        )
+
+    def test_yielded_and_operand_still_escapes(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def and_tail(register, flag):
+                    def on_event():
+                        pass
+                    register(flag and on_event)
+                """),
+            ["SLP020"],
+        )
+
+    def test_compile_error_honors_explicit_slp000_suppression(self) -> None:
+        self.assertEqual(self.codes("return 1  # noqa: SLP000\n"), [])
+        self.assertEqual(self.codes("return 1  # noqa: SLP001\n"), ["SLP000"])
+        self.assertEqual(self.codes("return 1  # noqa\n"), ["SLP000"])
+
+    def test_concurrent_linting_restores_warning_filters(self) -> None:
+        import warnings
+        from concurrent.futures import ThreadPoolExecutor
+
+        before = list(warnings.filters)
+
+        def worker(_: int) -> int:
+            for _ in range(200):
+                pyclichecker.lint_source("x = '\\d'\nreturn 1\n", path="a.py")
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            # result() re-raises any exception from a worker.
+            self.assertEqual(
+                [f.result() for f in [pool.submit(worker, i) for i in range(8)]],
+                [0] * 8,
+            )
+        self.assertEqual(list(warnings.filters), before)
+
+    def test_comprehension_targets_shadow_imported_modules(self) -> None:
+        self.assertEqual(
+            self.codes(
+                """
+                import tempfile
+                module_level = [tempfile.mktemp() for tempfile in values]
+                f = lambda values: [tempfile.mktemp() for tempfile in values]
+                g = {tempfile: tempfile.mktemp() for tempfile in values}
+                """,
+                "SLP019",
+            ),
+            [],
+        )
+        # The first iterable runs in the enclosing scope and is still checked.
+        self.assertEqual(
+            self.codes(
+                "import tempfile\npaths = [p for p in [tempfile.mktemp()]]\n", "SLP019"
+            ),
+            ["SLP019"],
+        )
+
+
+class Issue11ExtensionPointTests(unittest.TestCase):
+    """Issue #11: the two public examples are warnings (SLP020), not errors."""
+
+    def findings(self, source: str) -> list[tuple[str, str]]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [(f.code, f.severity) for f in found]
+
+    def test_httpx_content_decoder_flush(self) -> None:
+        # encode/httpx b5addb6, httpx/_decoders.py line 40.
+        self.assertEqual(
+            self.findings("""
+                class ContentDecoder:
+                    def decode(self, data: bytes) -> bytes:
+                        raise NotImplementedError()  # pragma: no cover
+
+                    def flush(self) -> bytes:
+                        raise NotImplementedError()  # pragma: no cover
+                """),
+            [("SLP020", "warning"), ("SLP020", "warning")],
+        )
+
+    def test_requests_adapter_add_headers(self) -> None:
+        # psf/requests 3c7baaa, src/requests/adapters.py line 599.
+        self.assertEqual(
+            self.findings("""
+                class HTTPAdapter:
+                    def add_headers(self, request, **kwargs):
+                        \"\"\"Add any headers needed by the connection. As of v2.0 this does
+                        nothing by default, but is left for overriding by users that subclass
+                        the :class:`HTTPAdapter <requests.adapters.HTTPAdapter>`.
+                        \"\"\"
+                        pass
+                """),
+            [("SLP020", "warning")],
+        )
+
+
+class Issue12AsyncCallbackTests(unittest.TestCase):
+    """Issue #12: SLP004 and async signatures that a caller requires."""
+
+    def slp004(self, source: str) -> list[str]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f.message.split("`")[1] for f in found if f.code == "SLP004"]
+
+    def test_escaping_nested_async_hooks_are_not_reported(self) -> None:
+        # httpx b5addb6 tests/client/test_event_hooks.py line 185 shape.
+        self.assertEqual(
+            self.slp004("""
+                async def test_hooks(make_client):
+                    async def on_request(request):
+                        seen.append(request)
+
+                    async def on_response(response):
+                        seen.append(response)
+
+                    client = make_client(event_hooks={"request": [on_request],
+                                                      "response": [on_response]})
+                    await client.get("/")
+
+                def factory():
+                    async def handler(request):
+                        return request
+                    return handler
+                """),
+            [],
+        )
+
+    def test_nested_async_that_does_not_escape_is_still_reported(self) -> None:
+        self.assertEqual(
+            self.slp004("""
+                async def outer():
+                    async def helper():
+                        return 1
+                    if helper:
+                        await outer()
+                """),
+            ["outer.helper"],
+        )
+
+    def test_module_level_async_without_await_is_still_reported(self) -> None:
+        # A hook registered from another file cannot be seen here.
+        self.assertEqual(
+            self.slp004("""
+                async def on_startup():
+                    return None
+                """),
+            ["on_startup"],
+        )
+
+    def test_registering_decorator_imposes_async_but_pytest_marker_does_not(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.slp004("""
+                import pytest
+
+                @app.on_event("startup")
+                async def warm_cache():
+                    cache.clear()
+
+                @pytest.mark.anyio
+                async def test_sync_body():
+                    assert 1 + 1 == 2
+                """),
+            ["test_sync_body"],
+        )
+
+    def test_async_comprehension_is_async_behavior(self) -> None:
+        # httpx b5addb6 tests/models/test_responses.py line 481 shape.
+        self.assertEqual(
+            self.slp004("""
+                async def collect(stream):
+                    return [part async for part in stream]
+
+                async def collect_nested(streams):
+                    return [[p async for p in s] for s in streams]
+                """),
+            [],
+        )
+
+
+class PytestMarkerDecoratorTests(unittest.TestCase):
+    """pytest markers register nothing, for SLP020 as for SLP004."""
+
+    def codes(self, source: str) -> list[str]:
+        found = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f.code for f in found]
+
+    def test_marker_decorated_stub_stays_slp001(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                import pytest
+                from pytest import mark
+
+                @pytest.mark.slow
+                def helper_one():
+                    pass
+
+                @mark.parametrize("x", [1])
+                def helper_two(x):
+                    pass
+                """),
+            ["SLP001", "SLP001"],
+        )
+
+    def test_fixture_stub_is_still_an_extension_point(self) -> None:
+        # A fixture is registered by name, so SLP020 (not SLP001) is right.
+        self.assertEqual(
+            self.codes("""
+                import pytest
+
+                @pytest.fixture
+                def resource():
+                    pass
+                """),
+            ["SLP020"],
         )
 
 
