@@ -2,6 +2,7 @@
 
 ## 2.6.0 - 2026-11-14
 
+- `SLP020` no longer treats pytest markers (`@pytest.mark.*`, also via `from pytest import mark`) as registering decorators, so a marker-decorated stub stays an `SLP001` error; `@pytest.fixture` stubs remain `SLP020`.
 - README: a Test code section on `SLP009` volume in tests and the existing
   `--exclude`, `--ignore` and `--baseline` options (#13). Rule severity is
   unchanged.

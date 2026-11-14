@@ -343,6 +343,10 @@ def _is_registering_decorator(decorator: ast.expr, aliases: dict[str, str]) -> b
     if raw_name.split(".")[-1] in _NON_REGISTERING_ATTRIBUTES:
         return False
     qualified_name = _resolve_imported_name(raw_name, aliases)
+    # pytest markers (``@pytest.mark.slow``, ``@pytest.mark.anyio``) annotate a
+    # test; they register nothing. Shared by SLP020 and SLP004.
+    if qualified_name.startswith("pytest.mark."):
+        return False
     return qualified_name.split(".")[0] not in _NON_REGISTERING_MODULES
 
 
@@ -8815,13 +8819,7 @@ class SlopVisitor(ast.NodeVisitor):
 
         aliases = self.alias_stack[-1]
         for decorator in record.node.decorator_list:
-            # pytest markers (``@pytest.mark.anyio``) annotate a test; they do
-            # not hand the function to an API that awaits it.
-            name = _resolve_imported_name(
-                _expression_name(_decorator_expression(decorator)), aliases
-            )
-            if name.startswith("pytest.mark."):
-                continue
+            # pytest markers are excluded inside _is_registering_decorator.
             if _is_registering_decorator(decorator, aliases):
                 return True
         enclosing = self.kind_stack[-1] if self.kind_stack else ""
