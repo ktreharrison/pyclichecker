@@ -7797,5 +7797,125 @@ class LoopIterableOracleTests(unittest.TestCase):
         )
 
 
+class SourceryReviewTests(unittest.TestCase):
+    """Defects from the Sourcery review of PR #17."""
+
+    def codes(self, source: str, code: str | None = None) -> list[str]:
+        findings = pyclichecker.lint_source(
+            textwrap.dedent(source), path="app.py", config=pyclichecker.LintConfig()
+        )
+        return [f.code for f in findings if code is None or f.code == code]
+
+    def timeout_codes(self, call: str) -> list[str]:
+        source = f"import requests\nr = {call}\nr.raise_for_status()\n"
+        return self.codes(source, "SLP010")
+
+    def test_later_dict_literal_entries_decide_the_timeout(self) -> None:
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": 5, "timeout": None})'),
+            ["SLP010"],
+        )
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": None, "timeout": 5})'),
+            [],
+        )
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{**opts, "timeout": None})'),
+            ["SLP010"],
+        )
+        # A later **entry inside the literal may replace an explicit None.
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": None, **opts})'), []
+        )
+
+    def test_separate_unpackings_cannot_override_an_explicit_timeout(self) -> None:
+        # A keyword repeated across `**` arguments raises TypeError, so an
+        # explicit None stays the effective value.
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", **{"timeout": None}, **opts)'),
+            ["SLP010"],
+        )
+        self.assertEqual(
+            self.timeout_codes('requests.get("u", timeout=None, **opts)'), ["SLP010"]
+        )
+
+    def test_callee_and_truth_only_operands_do_not_escape(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def callee(flag, other):
+                    def on_event():
+                        pass
+                    (on_event if flag else other)()
+
+                def bool_callee(other):
+                    def on_event():
+                        pass
+                    (on_event or other)()
+
+                def and_head(register, flag):
+                    def on_event():
+                        pass
+                    register(on_event and flag)
+                """),
+            ["SLP001", "SLP001", "SLP001"],
+        )
+
+    def test_yielded_and_operand_still_escapes(self) -> None:
+        self.assertEqual(
+            self.codes("""
+                def and_tail(register, flag):
+                    def on_event():
+                        pass
+                    register(flag and on_event)
+                """),
+            ["SLP020"],
+        )
+
+    def test_compile_error_honors_explicit_slp000_suppression(self) -> None:
+        self.assertEqual(self.codes("return 1  # noqa: SLP000\n"), [])
+        self.assertEqual(self.codes("return 1  # noqa: SLP001\n"), ["SLP000"])
+        self.assertEqual(self.codes("return 1  # noqa\n"), ["SLP000"])
+
+    def test_concurrent_linting_restores_warning_filters(self) -> None:
+        import warnings
+        from concurrent.futures import ThreadPoolExecutor
+
+        before = list(warnings.filters)
+
+        def worker(_: int) -> int:
+            for _ in range(200):
+                pyclichecker.lint_source("x = '\\d'\nreturn 1\n", path="a.py")
+            return 0
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            # result() re-raises any exception from a worker.
+            self.assertEqual(
+                [f.result() for f in [pool.submit(worker, i) for i in range(8)]],
+                [0] * 8,
+            )
+        self.assertEqual(list(warnings.filters), before)
+
+    def test_comprehension_targets_shadow_imported_modules(self) -> None:
+        self.assertEqual(
+            self.codes(
+                """
+                import tempfile
+                module_level = [tempfile.mktemp() for tempfile in values]
+                f = lambda values: [tempfile.mktemp() for tempfile in values]
+                g = {tempfile: tempfile.mktemp() for tempfile in values}
+                """,
+                "SLP019",
+            ),
+            [],
+        )
+        # The first iterable runs in the enclosing scope and is still checked.
+        self.assertEqual(
+            self.codes(
+                "import tempfile\npaths = [p for p in [tempfile.mktemp()]]\n", "SLP019"
+            ),
+            ["SLP019"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,14 @@
   earlier on the line moved the reported column right. Fingerprints are unchanged.
 - `SLP014` counts a test oracle evaluated in a loop's iterable
   (`for _ in [pytest.fail(...)]`), which runs even when the body does not.
+- `SLP010` reads a `**{...}` dict literal to the end, so a later duplicate `timeout`
+  key or `**entry` decides the effective timeout.
+- `SLP020` no longer treats a nested callback as escaping when it is only called
+  (`(cb if flag else other)()`) or only truth-tested (`cb and x`).
+- A compile-time `SLP000` honors an explicit `# noqa: SLP000`, and compiling no
+  longer races on the process-wide warning filters when linting from threads.
+- Comprehension targets shadow imported modules of the same name for `SLP010` and
+  `SLP019` (`[tempfile.mktemp() for tempfile in values]` is not a tempfile call).
 
 ## 2.5.0 - 2026-10-11
 

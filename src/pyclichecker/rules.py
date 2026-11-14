@@ -4,6 +4,7 @@ import ast
 import builtins
 import io
 import re
+import threading
 import tokenize
 import warnings
 from bisect import bisect_left, bisect_right
@@ -419,14 +420,23 @@ class _EscapeScanner:
         # `register(cb if flag else other)` and `cb or default` pass `cb` on.
         # Judge those operands by the expression's own parent. The IfExp test
         # is only read for truth, so it keeps the IfExp as its parent.
-        if isinstance(node, ast.IfExp):
-            self.visit(node.test, node)
-            self.visit(node.body, parent)
-            self.visit(node.orelse, parent)
-            return
-        if isinstance(node, ast.BoolOp):
-            for value in node.values:
-                self.visit(value, parent)
+        # A callee position (`(cb if flag else other)()`) only calls the
+        # operand, so the operands keep the expression as their parent. In
+        # `a and b`, every operand but the last is read for truth only: a
+        # function is always true, so `cb and x` yields `x`.
+        if isinstance(node, ast.IfExp | ast.BoolOp):
+            yielded = (
+                node if isinstance(parent, ast.Call) and parent.func is node else parent
+            )
+            if isinstance(node, ast.IfExp):
+                self.visit(node.test, node)
+                self.visit(node.body, yielded)
+                self.visit(node.orelse, yielded)
+                return
+            last = len(node.values) - 1
+            for index, value in enumerate(node.values):
+                truth_only = isinstance(node.op, ast.And) and index < last
+                self.visit(value, node if truth_only else yielded)
             return
         for child in ast.iter_child_nodes(node):
             self.visit(child, node)
@@ -2341,7 +2351,8 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         # bodies and lambda bodies. Calls there are still checked by the rules
         # that need no flow analysis (SLP010, SLP019).
         self.detached_depth = 0
-        # Lambda parameters shadow module aliases inside the lambda body.
+        # Lambda parameters and comprehension targets shadow module aliases
+        # inside their scope.
         self.shadowed: list[set[str]] = []
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -2423,6 +2434,46 @@ class _OperationalCallVisitor(ast.NodeVisitor):
         self.visit(node.body)
         self.detached_depth -= 1
         self.shadowed.pop()
+
+    def _visit_comprehension(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp,
+        results: Sequence[ast.expr],
+    ) -> None:
+        # The first iterable runs in the enclosing scope; targets, later
+        # iterables, conditions and the result run in the comprehension's own
+        # scope, where a target such as `for tempfile in values` hides the
+        # imported module of the same name.
+        first, *rest = node.generators
+        self.visit(first.iter)
+        names = {
+            name.id
+            for generator in node.generators
+            for name in ast.walk(generator.target)
+            if isinstance(name, ast.Name)
+        }
+        self.shadowed.append(names)
+        for condition in first.ifs:
+            self.visit(condition)
+        for generator in rest:
+            self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for result in results:
+            self.visit(result)
+        self.shadowed.pop()
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension(node, (node.elt,))
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension(node, (node.key, node.value))
 
 
 def _collect_import_aliases(body: Sequence[ast.stmt]) -> dict[str, str]:
@@ -6111,20 +6162,46 @@ def _call_has_timeout(node: ast.Call, qualified_name: str) -> bool:
             isinstance(positional_timeout, ast.Constant)
             and positional_timeout.value is None
         )
-    # `**options` may carry the timeout. A dict literal can be checked; any
-    # other mapping cannot, so give it the benefit of the doubt rather than
-    # report a timeout that may well be there.
+    # `**options` may carry the timeout. Separate `**` arguments cannot
+    # override one another (a repeated keyword raises TypeError), so the first
+    # definite answer stands. Inside one dict literal, later entries override
+    # earlier ones, so read it to the end. A mapping that cannot be read gets
+    # the benefit of the doubt rather than a report of a timeout that may well
+    # be there.
+    unknown = False
     for keyword in node.keywords:
         if keyword.arg is not None:
             continue
-        if not isinstance(keyword.value, ast.Dict):
-            return True
-        for key, value in zip(keyword.value.keys, keyword.value.values, strict=True):
-            if key is None:
-                return True
-            if isinstance(key, ast.Constant) and key.value == "timeout":
-                return not (isinstance(value, ast.Constant) and value.value is None)
-    return False
+        state = _dict_literal_timeout(keyword.value)
+        if state is None:
+            unknown = True
+        elif state != "absent":
+            return state == "set"
+    return unknown
+
+
+def _dict_literal_timeout(node: ast.expr) -> str | None:
+    """Return "set", "none" or "absent" for a dict literal's effective timeout.
+
+    Returns None when the value is not a dict literal, or a later `**entry`
+    inside it may change the answer.
+    """
+
+    if not isinstance(node, ast.Dict):
+        return None
+    state: str | None = "absent"
+    for key, value in zip(node.keys, node.values, strict=True):
+        if key is None:
+            # `{..., **more}` may add or replace the timeout.
+            inner = _dict_literal_timeout(value)
+            if inner is None:
+                state = None
+            elif inner != "absent":
+                state = inner
+        elif isinstance(key, ast.Constant) and key.value == "timeout":
+            is_none = isinstance(value, ast.Constant) and value.value is None
+            state = "none" if is_none else "set"
+    return state
 
 
 def _blocking_call_guidance(qualified_name: str) -> str:
@@ -9464,6 +9541,52 @@ def _collect_header_suppression_lines(
     return suppression_lines
 
 
+def _syntax_error_findings(
+    source: str, path: str, error: SyntaxError, config: LintConfig
+) -> list[Finding]:
+    """Report a parser or compiler SyntaxError as SLP000, unless disabled or suppressed."""
+
+    if "SLP000" not in config.enabled_codes:
+        return []
+    # Honor an explicit SLP000 suppression comment on the reported line, as
+    # for any other rule. collect_comments tolerates source that cannot tokenize.
+    reported_line = error.lineno or 1
+    if any(
+        comment.line == reported_line
+        and "SLP000" in _comment_suppression_codes(comment.text)
+        for comment in collect_comments(source)
+    ):
+        return []
+    message = error.msg or "invalid Python syntax"
+    return [
+        Finding(
+            path=path,
+            line=error.lineno or 1,
+            column=error.offset or 1,
+            code="SLP000",
+            message=message,
+            evidence=(f"Python parser reported: {message}",),
+            fingerprint=make_fingerprint(
+                path,
+                "SLP000",
+                "\0".join(
+                    (
+                        message,
+                        (
+                            source.splitlines()[error.lineno - 1].strip()
+                            if error.lineno and error.lineno <= len(source.splitlines())
+                            else ""
+                        ),
+                    )
+                ),
+            ),
+        )
+    ]
+
+
+_COMPILE_WARNINGS_LOCK = threading.Lock()
+
+
 def lint_source(
     source: str,
     *,
@@ -9479,38 +9602,13 @@ def lint_source(
         # function, `break` outside a loop, duplicate parameters. Compile the
         # tree (never execute it) so those are reported as SLP000 too.
         # Compiler warnings (for example invalid escapes) are not findings.
-        with warnings.catch_warnings():
+        # catch_warnings() swaps the process-wide filter list, so concurrent
+        # callers would restore each other's filters out of order. Serialize.
+        with _COMPILE_WARNINGS_LOCK, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             compile(tree, path, "exec", dont_inherit=True)
     except SyntaxError as error:
-        if "SLP000" not in active_config.enabled_codes:
-            return []
-        message = error.msg or "invalid Python syntax"
-        return [
-            Finding(
-                path=path,
-                line=error.lineno or 1,
-                column=error.offset or 1,
-                code="SLP000",
-                message=message,
-                evidence=(f"Python parser reported: {message}",),
-                fingerprint=make_fingerprint(
-                    path,
-                    "SLP000",
-                    "\0".join(
-                        (
-                            message,
-                            (
-                                source.splitlines()[error.lineno - 1].strip()
-                                if error.lineno
-                                and error.lineno <= len(source.splitlines())
-                                else ""
-                            ),
-                        )
-                    ),
-                ),
-            )
-        ]
+        return _syntax_error_findings(source, path, error, active_config)
 
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
